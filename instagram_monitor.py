@@ -47,6 +47,12 @@ SESSION_USERNAME = ""
 #   - Hard-code it in the code or config file
 SESSION_PASSWORD = ""
 
+# Optional direct Instagram cookie auth (alternative to username/password file session)
+# Useful for headless deployments where you want to provide cookies via env vars.
+# If SESSIONID is provided, the tool will try cookie-based login first.
+INSTAGRAM_SESSIONID = ""
+INSTAGRAM_CSRFTOKEN = ""
+
 # SMTP settings for sending email notifications
 # If left as-is, no notifications will be sent
 #
@@ -607,6 +613,8 @@ def generate_config_with_current_values() -> str:
 # Do not change values below - modify them in the configuration section or config file instead
 SESSION_USERNAME = ""
 SESSION_PASSWORD = ""
+INSTAGRAM_SESSIONID = ""
+INSTAGRAM_CSRFTOKEN = ""
 SMTP_HOST: str = ""
 SMTP_PORT: int = 0
 SMTP_USER: str = ""
@@ -702,7 +710,14 @@ exec(CONFIG_BLOCK, globals())
 DEFAULT_CONFIG_FILENAME = "instagram_monitor.conf"
 
 # List of secret keys to load from env/config
-SECRET_KEYS = ("SESSION_PASSWORD", "SMTP_PASSWORD", "WEBHOOK_URL", "TELEGRAM_BOT_TOKEN")
+SECRET_KEYS = (
+    "SESSION_PASSWORD",
+    "INSTAGRAM_SESSIONID",
+    "INSTAGRAM_CSRFTOKEN",
+    "SMTP_PASSWORD",
+    "WEBHOOK_URL",
+    "TELEGRAM_BOT_TOKEN",
+)
 
 # Default value for network-related timeouts in functions
 FUNCTION_TIMEOUT = 15
@@ -6833,7 +6848,7 @@ def simulate_human_actions(bot: instaloader.Instaloader, sleep_seconds: int) -> 
 
 # Monitors activity of the specified Instagram user
 def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, skip_followings, skip_getting_story_details, skip_getting_posts_details, get_more_post_details, wait_for_prev_user=None, signal_loading_complete=None, stop_event=None, user_root_path=None, manual_recheck=False, skip_follow_changes=False):  # type: ignore[reportComplexity]
-    global pbar, DASHBOARD_DATA, VERBOSE_MODE, CHECK_COUNT
+    global pbar, DASHBOARD_DATA, VERBOSE_MODE, CHECK_COUNT, SESSION_USERNAME
     _thread_local.user = user  # Store user in thread-local storage for debug_print
     _thread_local.in_partial_line = False  # Track partial line prints
     update_ui_data(targets={user: {'status': 'Starting'}})
@@ -6890,6 +6905,30 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         orig_request = ctx._session.request
 
         session = ctx._session
+
+        if not skip_session and INSTAGRAM_SESSIONID:
+            try:
+                cookie_dict = {"sessionid": INSTAGRAM_SESSIONID}
+                if INSTAGRAM_CSRFTOKEN:
+                    cookie_dict["csrftoken"] = INSTAGRAM_CSRFTOKEN
+                bot.context._session.cookies.update(cookie_dict)
+                cookie_username = bot.test_login()
+                if not cookie_username:
+                    raise RuntimeError("Cookie auth failed (sessionid may be expired)")
+                if not SESSION_USERNAME:
+                    SESSION_USERNAME = str(cookie_username)
+                with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
+                    WEB_DASHBOARD_DATA['session']['active'] = True
+                    WEB_DASHBOARD_DATA['session']['username'] = SESSION_USERNAME
+                log_activity("Instagram cookie session auth successful", user=SESSION_USERNAME, level='system')
+            except Exception as e:
+                error_msg = format_error_message(e)
+                print(f"* Session cookie auth error for {user}: {error_msg}")
+                print_cur_ts("\nTimestamp:\t\t\t\t")
+                log_activity(f"Session cookie auth error: {error_msg}", user=user)
+                if threading.current_thread() is threading.main_thread():
+                    sys.exit(1)
+                return
 
         if not skip_session and SESSION_USERNAME:
             try:
@@ -9299,7 +9338,7 @@ def get_target_paths(user):
 
 
 def run_main():
-    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER
+    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, INSTAGRAM_SESSIONID, INSTAGRAM_CSRFTOKEN, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
     global TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_STATUS_NOTIFICATION, TELEGRAM_FOLLOWERS_NOTIFICATION, TELEGRAM_ERROR_NOTIFICATION, TELEGRAM_TARGETS
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
@@ -9406,6 +9445,20 @@ def run_main():
         metavar="SESSION_PASSWORD",
         type=str,
         help="Instagram password for session login (recommended to use saved session)"
+    )
+    creds.add_argument(
+        "--sessionid",
+        dest="instagram_sessionid",
+        metavar="SESSIONID",
+        type=str,
+        help="Instagram sessionid cookie value (alternative auth mode for headless environments)"
+    )
+    creds.add_argument(
+        "--csrftoken",
+        dest="instagram_csrftoken",
+        metavar="CSRFTOKEN",
+        type=str,
+        help="Instagram csrftoken cookie value (recommended with --sessionid)"
     )
 
     # Notifications
@@ -10180,7 +10233,13 @@ def run_main():
     if args.session_password:
         SESSION_PASSWORD = args.session_password
 
-    if not SESSION_USERNAME:
+    if args.instagram_sessionid:
+        INSTAGRAM_SESSIONID = str(args.instagram_sessionid).strip()
+
+    if args.instagram_csrftoken:
+        INSTAGRAM_CSRFTOKEN = str(args.instagram_csrftoken).strip()
+
+    if not SESSION_USERNAME and not INSTAGRAM_SESSIONID:
         SKIP_SESSION = True
 
     # Validate INSTA_CHECK_INTERVAL to prevent division by zero
