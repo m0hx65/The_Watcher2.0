@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: instagram-monitor-telegram-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_ENABLED
+        value: "true"
+      - key: WEB_DASHBOARD_HOST
+        value: "0.0.0.0"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
