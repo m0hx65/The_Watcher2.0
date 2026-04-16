@@ -2393,16 +2393,21 @@ def _mark_instagram_rate_limited(reason: str = "429", cooldown_minutes: int = 35
         )
 
 
-def _instagram_recheck_block_message() -> Optional[str]:
+def _instagram_rate_limit_remaining_seconds() -> int:
     global INSTAGRAM_RATE_LIMIT_UNTIL
     if not INSTAGRAM_RATE_LIMIT_UNTIL:
-        return None
+        return 0
     now = now_local_naive()
     if now >= INSTAGRAM_RATE_LIMIT_UNTIL:
         INSTAGRAM_RATE_LIMIT_UNTIL = None
+        return 0
+    return max(1, int((INSTAGRAM_RATE_LIMIT_UNTIL - now).total_seconds()))
+
+
+def _instagram_recheck_block_message() -> Optional[str]:
+    remaining_s = _instagram_rate_limit_remaining_seconds()
+    if remaining_s <= 0 or not INSTAGRAM_RATE_LIMIT_UNTIL:
         return None
-    remaining_s = int((INSTAGRAM_RATE_LIMIT_UNTIL - now).total_seconds())
-    remaining_s = max(1, remaining_s)
     return (
         f"Instagram is rate-limited right now. "
         f"Try again at {INSTAGRAM_RATE_LIMIT_UNTIL.strftime('%H:%M:%S')} "
@@ -8057,12 +8062,41 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     # Primary loop
     consecutive_main_errors = 0
     consecutive_behuman_errors = 0
+    rate_limit_pause_announced = False
     while True:
         # Check stop event at the start of each loop iteration
         if stop_event and stop_event.is_set():
             print(f"* Monitoring stopped for {user}\n")
             print_cur_ts("Timestamp:\t\t\t\t")
             return
+
+        # Respect global cooldown after Instagram 429/checkpoint signals.
+        # This prevents aggressive retries while the account/IP is temporarily blocked.
+        rate_limit_remaining_s = _instagram_rate_limit_remaining_seconds()
+        if rate_limit_remaining_s > 0:
+            until = INSTAGRAM_RATE_LIMIT_UNTIL
+            until_text = until.strftime('%H:%M:%S') if isinstance(until, datetime) else "soon"
+            status_msg = f"Rate-limited until {until_text} ({display_time(rate_limit_remaining_s)} left)"
+            if WEB_DASHBOARD_ENABLED:
+                update_ui_data(targets={user: {'status': status_msg}})
+            if not rate_limit_pause_announced:
+                log_activity(status_msg, user=user, level='warning')
+                rate_limit_pause_announced = True
+
+            while rate_limit_remaining_s > 0:
+                if stop_event and stop_event.is_set():
+                    print(f"* Monitoring stopped for {user}\n")
+                    print_cur_ts("Timestamp:\t\t\t\t")
+                    return
+                sleep_chunk = min(1, rate_limit_remaining_s)
+                if stop_event:
+                    stop_event.wait(sleep_chunk)
+                else:
+                    time.sleep(sleep_chunk)
+                rate_limit_remaining_s -= sleep_chunk
+            continue
+        else:
+            rate_limit_pause_announced = False
 
         reset_thread_output()
         if WEB_DASHBOARD_ENABLED:
@@ -8182,6 +8216,14 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             except Exception as e:
                 r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
                 error_msg = format_error_message(e)
+                err_lower = error_msg.lower()
+                if "429" in err_lower or "too many requests" in err_lower:
+                    _mark_instagram_rate_limited("429")
+                elif "checkpoint" in err_lower or "challenge" in err_lower:
+                    _mark_instagram_rate_limited("checkpoint/challenge")
+                cooldown_sleep_s = _instagram_rate_limit_remaining_seconds()
+                if cooldown_sleep_s > r_sleep_time:
+                    r_sleep_time = cooldown_sleep_s
                 print(f"* Error, retrying in {display_time(r_sleep_time)}: {error_msg}")
                 log_activity(f"Error: {error_msg}", user=user)
                 debug_print(f"Full exception: {type(e).__name__}: {e}")
@@ -9013,6 +9055,15 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     r_sleep_time = randomize_number(INSTA_CHECK_INTERVAL, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH)
                     r_sleep_time, next_check_val = compute_next_check_with_hours_range(now, r_sleep_time)
                     error_msg = format_error_message(e)
+                    err_lower = error_msg.lower()
+                    if "429" in err_lower or "too many requests" in err_lower:
+                        _mark_instagram_rate_limited("429")
+                    elif "checkpoint" in err_lower or "challenge" in err_lower:
+                        _mark_instagram_rate_limited("checkpoint/challenge")
+                    cooldown_sleep_s = _instagram_rate_limit_remaining_seconds()
+                    if cooldown_sleep_s > r_sleep_time:
+                        r_sleep_time = cooldown_sleep_s
+                        next_check_val = now + timedelta(seconds=r_sleep_time)
                     print(f"* Error, retrying in {display_time(r_sleep_time)}: {error_msg}")
                     if 'Redirected' in str(e) or 'login' in str(e) or 'Forbidden' in str(e) or 'Wrong' in str(e) or 'Bad Request' in str(e):
                         print("* Session might not be valid anymore!")
