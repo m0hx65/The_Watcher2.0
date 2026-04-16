@@ -785,6 +785,7 @@ TELEGRAM_BOT_LAST_UPDATE_ID = 0
 TELEGRAM_TARGETS = []
 TELEGRAM_PENDING_ACTIONS = {}  # chat_id -> "add" | "remove"
 INSTAGRAM_RATE_LIMIT_UNTIL = None  # local naive datetime until rechecks are blocked
+LAST_RUNTIME_ERROR = None  # {'timestamp': datetime, 'user': str|None, 'source': str, 'message': str}
 
 import sys
 import signal
@@ -2354,6 +2355,33 @@ def _format_telegram_status_text() -> str:
     )
 
 
+def _set_last_runtime_error(message: str, user: Optional[str] = None, source: str = "monitor") -> None:
+    global LAST_RUNTIME_ERROR
+    LAST_RUNTIME_ERROR = {
+        "timestamp": now_local_naive(),
+        "user": user,
+        "source": source,
+        "message": str(message).strip(),
+    }
+
+
+def _format_last_runtime_error_text() -> str:
+    if not LAST_RUNTIME_ERROR:
+        return "No runtime errors recorded in this process yet."
+    ts = LAST_RUNTIME_ERROR.get("timestamp")
+    ts_text = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else "n/a"
+    user = LAST_RUNTIME_ERROR.get("user") or "n/a"
+    source = LAST_RUNTIME_ERROR.get("source") or "unknown"
+    msg = LAST_RUNTIME_ERROR.get("message") or "n/a"
+    return (
+        "*Last Runtime Error*\n"
+        f"• Time: {ts_text}\n"
+        f"• Source: {source}\n"
+        f"• Target: {user}\n"
+        f"• Message: {msg[:1000]}"
+    )
+
+
 def _mark_instagram_rate_limited(reason: str = "429", cooldown_minutes: int = 35) -> None:
     global INSTAGRAM_RATE_LIMIT_UNTIL
     until = now_local_naive() + timedelta(minutes=max(1, int(cooldown_minutes)))
@@ -2452,6 +2480,7 @@ def _handle_telegram_command(command_text: str, chat_id: Any) -> Optional[str]:
         return (
             "*Commands*\n"
             "/status - Show monitor health summary\n"
+            "/lasterror - Show latest runtime/fetch error\n"
             "/targets - List configured targets\n"
             "/add [username|url] - Add target (or tap /add, then send username/URL)\n"
             "/remove [username|url] - Remove target (or tap /remove, then send username/URL)\n"
@@ -2462,6 +2491,8 @@ def _handle_telegram_command(command_text: str, chat_id: Any) -> Optional[str]:
         )
     if cmd == "/status":
         return _format_telegram_status_text()
+    if cmd == "/lasterror":
+        return _format_last_runtime_error_text()
     if cmd == "/targets":
         if not TELEGRAM_TARGETS:
             return "No targets configured."
@@ -2523,7 +2554,8 @@ def _handle_telegram_command(command_text: str, chat_id: Any) -> Optional[str]:
 def _telegram_default_reply_markup() -> Dict[str, Any]:
     return {
         "keyboard": [
-            [{"text": "/status"}, {"text": "/targets"}],
+            [{"text": "/status"}, {"text": "/lasterror"}],
+            [{"text": "/targets"}],
             [{"text": "/add "}, {"text": "/remove "}],
             [{"text": "/recheck"}, {"text": "/resume"}, {"text": "/stop"}],
         ],
@@ -6963,6 +6995,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             except Exception as e:
                 error_msg = format_error_message(e)
+                _set_last_runtime_error(error_msg, user=user, source="session")
                 print(f"* Session error for {user}: {error_msg}")
                 print_cur_ts("\nTimestamp:\t\t\t\t")
                 log_activity(f"Session error: {error_msg}", user=user)
@@ -7139,6 +7172,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     except Exception as e:
         _thread_local.in_partial_line = False
         error_msg = format_error_message(e)
+        _set_last_runtime_error(error_msg, user=user, source="monitor")
         err_lower = error_msg.lower()
         if "429" in err_lower or "too many requests" in err_lower:
             _mark_instagram_rate_limited("429")
@@ -10812,6 +10846,7 @@ def main():
     except Exception as e:
         # Critical error handling
         error_trace = traceback.format_exc()
+        _set_last_runtime_error(str(e), source="critical")
 
         # Stop Terminal Dashboard so we can see the error
         if DASHBOARD_LIVE:
