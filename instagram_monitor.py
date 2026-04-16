@@ -6370,6 +6370,11 @@ def instagram_wrap_request(orig_request):
             # If jitter is disabled, just perform the request (but still optionally serialized by the outer lock)
             if not ENABLE_JITTER:
                 resp = orig_request(*args, **kwargs)
+                # Even without jitter mode, still mark cooldown on rate-limit/checkpoint responses.
+                if resp.status_code == 429:
+                    _mark_instagram_rate_limited("429")
+                elif resp.status_code == 400 and "checkpoint" in resp.text:
+                    _mark_instagram_rate_limited("checkpoint")
                 # Still process progress bar even if jitter is disabled
                 _update_progress_bar(resp)
                 return resp
