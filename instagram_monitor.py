@@ -852,7 +852,7 @@ except ModuleNotFoundError:
 from instaloader.exceptions import PrivateProfileNotFollowedException
 from html import escape
 from itertools import islice
-from typing import Optional, Tuple, Any, Callable, List
+from typing import Optional, Tuple, Any, Callable, List, Dict
 from glob import glob
 import sqlite3
 from sqlite3 import OperationalError, connect
@@ -2298,11 +2298,22 @@ def recheck_all_targets():
 
 
 def _telegram_commands_enabled() -> bool:
-    return bool(TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    return bool(TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN)
 
 
 def _telegram_admin_authorized(chat_id: Any) -> bool:
-    return _normalize_telegram_chat_id(chat_id) == _normalize_telegram_chat_id(TELEGRAM_CHAT_ID)
+    global TELEGRAM_CHAT_ID
+    incoming = _normalize_telegram_chat_id(chat_id)
+    configured = _normalize_telegram_chat_id(TELEGRAM_CHAT_ID)
+    if not incoming:
+        return False
+    if not configured:
+        # Auto-bind first chatting admin if TELEGRAM_CHAT_ID wasn't configured.
+        TELEGRAM_CHAT_ID = incoming
+        log_activity("Telegram admin chat auto-bound from first command", user=incoming, level='system')
+        print(f"* Telegram admin chat auto-bound to chat id: {incoming}")
+        return True
+    return incoming == configured
 
 
 def _format_telegram_status_text() -> str:
@@ -2322,6 +2333,8 @@ def _format_telegram_status_text() -> str:
 
 def _handle_telegram_command(command_text: str) -> Optional[str]:
     cmd = command_text.strip().split()[0].lower()
+    # Telegram may send commands with bot mention suffix, e.g. /start@my_bot
+    cmd = cmd.split("@", 1)[0]
     if cmd == "/start":
         return "Bot is online. Use /help to see available commands."
     if cmd == "/help":
@@ -2406,6 +2419,18 @@ def _handle_telegram_command(command_text: str) -> Optional[str]:
     return "Unknown command. Use /help."
 
 
+def _telegram_default_reply_markup() -> Dict[str, Any]:
+    return {
+        "keyboard": [
+            [{"text": "/status"}, {"text": "/targets"}],
+            [{"text": "/add "}, {"text": "/remove "}],
+            [{"text": "/recheck"}, {"text": "/resume"}, {"text": "/stop"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+
 def start_telegram_bot_loop():
     global TELEGRAM_BOT_THREAD, TELEGRAM_BOT_STOP_EVENT, TELEGRAM_BOT_LAST_UPDATE_ID
     if not _telegram_commands_enabled():
@@ -2420,8 +2445,18 @@ def start_telegram_bot_loop():
         global TELEGRAM_BOT_LAST_UPDATE_ID
         token = str(TELEGRAM_BOT_TOKEN).strip()
         get_updates_url = f"https://api.telegram.org/bot{token}/getUpdates"
+        delete_webhook_url = f"https://api.telegram.org/bot{token}/deleteWebhook"
 
-        send_telegram_message("Instagram monitor bot started.", notification_type="status")
+        # Ensure long polling works even if a webhook was previously configured.
+        try:
+            req.get(delete_webhook_url, params={"drop_pending_updates": False}, timeout=10)
+        except Exception:
+            pass
+
+        if TELEGRAM_CHAT_ID:
+            send_telegram_message("Instagram monitor bot started.", notification_type="status")
+        else:
+            print("* Telegram bot polling started. Waiting for first /start to bind admin chat.")
 
         while TELEGRAM_BOT_STOP_EVENT and not TELEGRAM_BOT_STOP_EVENT.is_set():
             try:
@@ -2431,7 +2466,14 @@ def start_telegram_bot_loop():
                 }
                 response = req.get(get_updates_url, params=params, timeout=25)
                 if response.status_code != 200:
-                    debug_print(f"* Telegram polling error: HTTP {response.status_code} - {response.text[:200]}")
+                    if response.status_code == 409:
+                        print("* Telegram polling conflict (HTTP 409). Clearing webhook and retrying.")
+                        try:
+                            req.get(delete_webhook_url, params={"drop_pending_updates": False}, timeout=10)
+                        except Exception:
+                            pass
+                    else:
+                        debug_print(f"* Telegram polling error: HTTP {response.status_code} - {response.text[:200]}")
                     time.sleep(2)
                     continue
 
@@ -2456,7 +2498,12 @@ def start_telegram_bot_loop():
 
                     reply = _handle_telegram_command(text)
                     if reply:
-                        send_telegram_message(reply, notification_type="status")
+                        send_telegram_message(
+                            reply,
+                            notification_type="status",
+                            chat_id_override=chat_id,
+                            reply_markup=_telegram_default_reply_markup(),
+                        )
             except Exception as e:
                 debug_print(f"* Telegram polling loop error: {e}")
                 time.sleep(2)
@@ -3436,12 +3483,22 @@ def _telegram_channel_enabled(notification_type: str = "status") -> bool:
     return True
 
 
-def send_telegram_message(text: str, notification_type: str = "status", parse_mode: str = "Markdown") -> int:
-    if not _telegram_channel_enabled(notification_type):
-        return 1
+def send_telegram_message(
+    text: str,
+    notification_type: str = "status",
+    parse_mode: str = "Markdown",
+    chat_id_override: Optional[Any] = None,
+    reply_markup: Optional[Dict[str, Any]] = None,
+) -> int:
+    if chat_id_override is None:
+        if not _telegram_channel_enabled(notification_type):
+            return 1
+    else:
+        if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN:
+            return 1
 
     token = str(TELEGRAM_BOT_TOKEN).strip()
-    chat_id = _normalize_telegram_chat_id(TELEGRAM_CHAT_ID)
+    chat_id = _normalize_telegram_chat_id(chat_id_override if chat_id_override is not None else TELEGRAM_CHAT_ID)
     if not token or not chat_id:
         debug_print("* Telegram error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
         return 1
@@ -3454,6 +3511,8 @@ def send_telegram_message(text: str, notification_type: str = "status", parse_mo
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     max_retries = 3
     retry_delay = 2
