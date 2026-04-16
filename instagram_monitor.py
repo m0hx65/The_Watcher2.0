@@ -47,12 +47,6 @@ SESSION_USERNAME = ""
 #   - Hard-code it in the code or config file
 SESSION_PASSWORD = ""
 
-# Optional direct Instagram cookie auth (alternative to username/password file session)
-# Useful for headless deployments where you want to provide cookies via env vars.
-# If SESSIONID is provided, the tool will try cookie-based login first.
-INSTAGRAM_SESSIONID = ""
-INSTAGRAM_CSRFTOKEN = ""
-
 # SMTP settings for sending email notifications
 # If left as-is, no notifications will be sent
 #
@@ -369,7 +363,7 @@ WEB_DASHBOARD_ENABLED = False
 # Port for the web dashboard server
 WEB_DASHBOARD_PORT = 8000
 
-# Host for the web dashboard server (use '0.0.0.0' to allow external access)
+# Host for the web dashboard server (use '0.0.0.0' to allow external access, it is not recommended!)
 WEB_DASHBOARD_HOST = '127.0.0.1'
 
 # Template directory for web dashboard
@@ -422,30 +416,6 @@ WEBHOOK_FOLLOWERS_NOTIFICATION = False
 # Send webhook on errors
 # Can also be enabled via the --webhook-errors flag
 WEBHOOK_ERROR_NOTIFICATION = False
-
-# ----------------------------
-# Telegram Bot Integration
-# ----------------------------
-# Enable Telegram notifications and command polling
-# Can also be enabled via the --telegram flag
-TELEGRAM_ENABLED = False
-
-# Telegram Bot token from @BotFather
-# It is recommended to keep this in .env as TELEGRAM_BOT_TOKEN
-TELEGRAM_BOT_TOKEN = ""
-
-# Allowed admin chat ID for this bot (single private admin model)
-# Messages from other chats are ignored
-TELEGRAM_CHAT_ID = ""
-
-# Send Telegram alerts on status changes (new posts/reels/stories, bio, profile pic, visibility)
-TELEGRAM_STATUS_NOTIFICATION = True
-
-# Send Telegram alerts on follower changes
-TELEGRAM_FOLLOWERS_NOTIFICATION = True
-
-# Send Telegram alerts on errors
-TELEGRAM_ERROR_NOTIFICATION = True
 
 # Webhook request payload template
 # Substitutions will apply for items in {}, which can include title, description, version, image_url, fields, fields_str, color, timestamp, username, avatar_url
@@ -613,8 +583,6 @@ def generate_config_with_current_values() -> str:
 # Do not change values below - modify them in the configuration section or config file instead
 SESSION_USERNAME = ""
 SESSION_PASSWORD = ""
-INSTAGRAM_SESSIONID = ""
-INSTAGRAM_CSRFTOKEN = ""
 SMTP_HOST: str = ""
 SMTP_PORT: int = 0
 SMTP_USER: str = ""
@@ -683,12 +651,6 @@ WEBHOOK_AVATAR_URL = ""
 WEBHOOK_STATUS_NOTIFICATION = True
 WEBHOOK_FOLLOWERS_NOTIFICATION = True
 WEBHOOK_ERROR_NOTIFICATION = False
-TELEGRAM_ENABLED = False
-TELEGRAM_BOT_TOKEN = ""
-TELEGRAM_CHAT_ID = ""
-TELEGRAM_STATUS_NOTIFICATION = True
-TELEGRAM_FOLLOWERS_NOTIFICATION = True
-TELEGRAM_ERROR_NOTIFICATION = True
 COLORED_OUTPUT = False
 COLOR_THEME = {}
 DEBUG_MODE = False
@@ -710,14 +672,7 @@ exec(CONFIG_BLOCK, globals())
 DEFAULT_CONFIG_FILENAME = "instagram_monitor.conf"
 
 # List of secret keys to load from env/config
-SECRET_KEYS = (
-    "SESSION_PASSWORD",
-    "INSTAGRAM_SESSIONID",
-    "INSTAGRAM_CSRFTOKEN",
-    "SMTP_PASSWORD",
-    "WEBHOOK_URL",
-    "TELEGRAM_BOT_TOKEN",
-)
+SECRET_KEYS = ("SESSION_PASSWORD", "SMTP_PASSWORD", "WEBHOOK_URL")
 
 # Default value for network-related timeouts in functions
 FUNCTION_TIMEOUT = 15
@@ -779,13 +734,6 @@ WEB_DASHBOARD_DATA = {
 WEB_DASHBOARD_MONITOR_THREADS = {}  # Active monitoring threads by username
 WEB_DASHBOARD_STOP_EVENTS = {}  # Stop events for each monitoring thread
 WEB_DASHBOARD_RECHECK_EVENTS = {}  # Recheck events for each monitoring thread
-TELEGRAM_BOT_THREAD = None
-TELEGRAM_BOT_STOP_EVENT = None
-TELEGRAM_BOT_LAST_UPDATE_ID = 0
-TELEGRAM_TARGETS = []
-TELEGRAM_PENDING_ACTIONS = {}  # chat_id -> "add" | "remove"
-INSTAGRAM_RATE_LIMIT_UNTIL = None  # Reserved for future use
-LAST_RUNTIME_ERROR = None  # {'timestamp': datetime, 'user': str|None, 'source': str, 'message': str}
 
 import sys
 import signal
@@ -807,13 +755,6 @@ import string
 import json
 import os
 from os.path import expanduser, dirname, basename
-
-# Render compatibility: honor platform-provided host/port when available.
-WEB_DASHBOARD_PORT = int(os.getenv('PORT', str(WEB_DASHBOARD_PORT)))
-if os.getenv('PORT'):
-    WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', '0.0.0.0')
-else:
-    WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', WEB_DASHBOARD_HOST)
 from datetime import datetime, timezone, timedelta
 from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
@@ -868,9 +809,15 @@ except ModuleNotFoundError:
     raise SystemExit("Error: Couldn't find the instaloader library !\n\nTo install it, run:\n    pip3 install instaloader\n\nOnce installed, re-run this tool. For more help, visit:\nhttps://instaloader.github.io/")
 
 from instaloader.exceptions import PrivateProfileNotFollowedException
-from html import escape
+from html import escape, unescape
+from types import SimpleNamespace
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 from itertools import islice
-from typing import Optional, Tuple, Any, Callable, List, Dict
+from typing import Optional, Tuple, Any, Callable, List
 from glob import glob
 import sqlite3
 from sqlite3 import OperationalError, connect
@@ -1509,7 +1456,6 @@ def create_web_dashboard_app():
         global DOTENV_FILE, WEB_DASHBOARD_TEMPLATE_DIR, LOCAL_TIMEZONE, OUTPUT_DIR, CSV_FILE
         global BE_HUMAN, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, LIVENESS_CHECK_INTERVAL, SKIP_FOLLOW_CHANGES
         global WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION
-        global TELEGRAM_ENABLED, TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_STATUS_NOTIFICATION, TELEGRAM_FOLLOWERS_NOTIFICATION, TELEGRAM_ERROR_NOTIFICATION
         global DISABLE_LOGGING, CHECK_POSTS_IN_HOURS_RANGE, HOURS_VERBOSE, MIN_H1, MAX_H1, MIN_H2, MAX_H2
         global DASHBOARD_SHOW_CHECK_SECONDS, TIME_FORMAT_12H
 
@@ -1567,11 +1513,6 @@ def create_web_dashboard_app():
         WEBHOOK_STATUS_NOTIFICATION = bool(update_setting('webhook_status', WEBHOOK_STATUS_NOTIFICATION, bool))
         WEBHOOK_FOLLOWERS_NOTIFICATION = bool(update_setting('webhook_followers', WEBHOOK_FOLLOWERS_NOTIFICATION, bool))
         WEBHOOK_ERROR_NOTIFICATION = bool(update_setting('webhook_errors', WEBHOOK_ERROR_NOTIFICATION, bool))
-        TELEGRAM_ENABLED = bool(update_setting('telegram_enabled', TELEGRAM_ENABLED, bool))
-        TELEGRAM_CHAT_ID = str(update_setting('telegram_chat_id', TELEGRAM_CHAT_ID, str))
-        TELEGRAM_STATUS_NOTIFICATION = bool(update_setting('telegram_status', TELEGRAM_STATUS_NOTIFICATION, bool))
-        TELEGRAM_FOLLOWERS_NOTIFICATION = bool(update_setting('telegram_followers', TELEGRAM_FOLLOWERS_NOTIFICATION, bool))
-        TELEGRAM_ERROR_NOTIFICATION = bool(update_setting('telegram_errors', TELEGRAM_ERROR_NOTIFICATION, bool))
 
         # Behavior
         FOLLOWERS_CHURN_DETECTION = bool(update_setting('followers_churn', FOLLOWERS_CHURN_DETECTION, bool))
@@ -1645,7 +1586,6 @@ def create_web_dashboard_app():
         global DOTENV_FILE, WEB_DASHBOARD_TEMPLATE_DIR, LOCAL_TIMEZONE, OUTPUT_DIR, CSV_FILE
         global BE_HUMAN, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, LIVENESS_CHECK_INTERVAL, SKIP_FOLLOW_CHANGES
         global WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION
-        global TELEGRAM_ENABLED, TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_STATUS_NOTIFICATION, TELEGRAM_FOLLOWERS_NOTIFICATION, TELEGRAM_ERROR_NOTIFICATION
         global DISABLE_LOGGING, CHECK_POSTS_IN_HOURS_RANGE, HOURS_VERBOSE, MIN_H1, MAX_H1, MIN_H2, MAX_H2
         global DASHBOARD_SHOW_CHECK_SECONDS, TIME_FORMAT_12H
 
@@ -1663,11 +1603,6 @@ def create_web_dashboard_app():
                 'webhook_status': WEBHOOK_STATUS_NOTIFICATION,
                 'webhook_followers': WEBHOOK_FOLLOWERS_NOTIFICATION,
                 'webhook_errors': WEBHOOK_ERROR_NOTIFICATION,
-                'telegram_enabled': TELEGRAM_ENABLED,
-                'telegram_chat_id': TELEGRAM_CHAT_ID,
-                'telegram_status': TELEGRAM_STATUS_NOTIFICATION,
-                'telegram_followers': TELEGRAM_FOLLOWERS_NOTIFICATION,
-                'telegram_errors': TELEGRAM_ERROR_NOTIFICATION,
                 'followers_churn': FOLLOWERS_CHURN_DETECTION,
                 'verbose_mode': VERBOSE_MODE,
                 'debug_mode': DEBUG_MODE,
@@ -2058,7 +1993,7 @@ def create_web_dashboard_app():
         # Temporarily enable if we are testing
         old_webhook_enabled = WEBHOOK_ENABLED
         WEBHOOK_ENABLED = True
-        res = send_webhook("instagram_monitor: test webhook", "This is **test webhook** - your settings seems to be **correct** !", color=0x7289DA, dispatch_telegram=False)
+        res = send_webhook("instagram_monitor: test webhook", "This is **test webhook** - your settings seems to be **correct** !", color=0x7289DA)
         WEBHOOK_ENABLED = old_webhook_enabled
 
         if res == 0:
@@ -2313,359 +2248,6 @@ def recheck_all_targets():
 
     threading.Thread(target=_staggered_rechecker_thread, daemon=True, name="recheck_all_launcher").start()
     return True
-
-
-def _telegram_commands_enabled() -> bool:
-    return bool(TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN)
-
-
-def _telegram_admin_authorized(chat_id: Any) -> bool:
-    global TELEGRAM_CHAT_ID
-    incoming = _normalize_telegram_chat_id(chat_id)
-    configured = _normalize_telegram_chat_id(TELEGRAM_CHAT_ID)
-    if not incoming:
-        return False
-    if not configured:
-        # Auto-bind first chatting admin if TELEGRAM_CHAT_ID wasn't configured.
-        TELEGRAM_CHAT_ID = incoming
-        log_activity("Telegram admin chat auto-bound from first command", user=incoming, level='system')
-        print(f"* Telegram admin chat auto-bound to chat id: {incoming}")
-        return True
-    return incoming == configured
-
-
-def _format_telegram_status_text() -> str:
-    active_threads = [u for u, t in WEB_DASHBOARD_MONITOR_THREADS.items() if t and t.is_alive()]
-    monitored_total = len(TELEGRAM_TARGETS)
-    last_check_text = str(LAST_CHECK_TIME) if LAST_CHECK_TIME else "n/a"
-    next_check_text = str(NEXT_CHECK_TIME) if NEXT_CHECK_TIME else (str(NEXT_CHECK_DISPLAY) if NEXT_CHECK_DISPLAY else "n/a")
-    return (
-        "*Instagram Monitor Status*\n"
-        f"• Targets configured: {monitored_total}\n"
-        f"• Targets running: {len(active_threads)}\n"
-        f"• Last check: {last_check_text}\n"
-        f"• Next check: {next_check_text}\n"
-        f"• Session mode: {mode_of_the_tool}"
-    )
-
-
-def _set_last_runtime_error(message: str, user: Optional[str] = None, source: str = "monitor") -> None:
-    global LAST_RUNTIME_ERROR
-    LAST_RUNTIME_ERROR = {
-        "timestamp": now_local_naive(),
-        "user": user,
-        "source": source,
-        "message": str(message).strip(),
-    }
-
-
-def _format_last_runtime_error_text() -> str:
-    if not LAST_RUNTIME_ERROR:
-        return "No runtime errors recorded in this process yet."
-    ts = LAST_RUNTIME_ERROR.get("timestamp")
-    ts_text = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else "n/a"
-    user = LAST_RUNTIME_ERROR.get("user") or "n/a"
-    source = LAST_RUNTIME_ERROR.get("source") or "unknown"
-    msg = LAST_RUNTIME_ERROR.get("message") or "n/a"
-    return (
-        "*Last Runtime Error*\n"
-        f"• Time: {ts_text}\n"
-        f"• Source: {source}\n"
-        f"• Target: {user}\n"
-        f"• Message: {msg[:1000]}"
-    )
-
-
-def _mark_instagram_rate_limited(reason: str = "429", cooldown_minutes: int = 35) -> None:
-    global INSTAGRAM_RATE_LIMIT_UNTIL
-    until = now_local_naive() + timedelta(minutes=max(1, int(cooldown_minutes)))
-    if INSTAGRAM_RATE_LIMIT_UNTIL is None or until > INSTAGRAM_RATE_LIMIT_UNTIL:
-        INSTAGRAM_RATE_LIMIT_UNTIL = until
-        log_activity(
-            f"Instagram rate limit detected ({reason}); recheck blocked until {until.strftime('%H:%M:%S')}",
-            level='warning'
-        )
-
-
-def _instagram_rate_limit_remaining_seconds() -> int:
-    global INSTAGRAM_RATE_LIMIT_UNTIL
-    if not INSTAGRAM_RATE_LIMIT_UNTIL:
-        return 0
-    now = now_local_naive()
-    if now >= INSTAGRAM_RATE_LIMIT_UNTIL:
-        INSTAGRAM_RATE_LIMIT_UNTIL = None
-        return 0
-    return max(1, int((INSTAGRAM_RATE_LIMIT_UNTIL - now).total_seconds()))
-
-
-def _instagram_recheck_block_message() -> Optional[str]:
-    remaining_s = _instagram_rate_limit_remaining_seconds()
-    if remaining_s <= 0 or not INSTAGRAM_RATE_LIMIT_UNTIL:
-        return None
-    return (
-        f"Instagram is rate-limited right now. "
-        f"Try again at {INSTAGRAM_RATE_LIMIT_UNTIL.strftime('%H:%M:%S')} "
-        f"(in {display_time(remaining_s)})."
-    )
-
-
-def _extract_instagram_username(text: str) -> Optional[str]:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-
-    # Accept full profile URL input, e.g. https://instagram.com/username/
-    m = re.search(r"(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9._]+)/?", raw, flags=re.IGNORECASE)
-    if m:
-        candidate = m.group(1)
-    else:
-        candidate = raw.split()[0]
-        if candidate.startswith("@"):
-            candidate = candidate[1:]
-        candidate = candidate.strip().strip("/")
-
-    if not candidate:
-        return None
-    if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", candidate):
-        return None
-    if candidate.lower() in {"p", "reel", "reels", "stories", "explore", "accounts", "direct", "tv"}:
-        return None
-    return candidate.lower()
-
-
-def _telegram_add_target(username: str) -> str:
-    if username in TELEGRAM_TARGETS:
-        return f"_{username}_ is already in the target list."
-
-    TELEGRAM_TARGETS.append(username)
-    with WEB_DASHBOARD_DATA_LOCK:
-        if 'targets' not in WEB_DASHBOARD_DATA:
-            WEB_DASHBOARD_DATA['targets'] = {}
-        if username not in WEB_DASHBOARD_DATA['targets']:
-            WEB_DASHBOARD_DATA['targets'][username] = {
-                'followers': None, 'following': None, 'posts': None, 'reels': None,
-                'status': 'Pending',
-                'added': get_short_date_from_ts(datetime.now(), show_year=False, show_seconds=False),
-                'last_checked': None
-            }
-    DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
-    start_monitoring_for_target(username)
-    log_activity("Added target via Telegram", user=username, level='system')
-    return f"Added *{username}* and started monitoring."
-
-
-def _telegram_remove_target(username: str) -> str:
-    if username not in TELEGRAM_TARGETS:
-        return f"_{username}_ is not in the target list."
-
-    stop_monitoring_for_target(username)
-    TELEGRAM_TARGETS.remove(username)
-    with WEB_DASHBOARD_DATA_LOCK:
-        WEB_DASHBOARD_DATA.get('targets', {}).pop(username, None)
-    DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
-    log_activity("Removed target via Telegram", user=username, level='warning')
-    return f"Removed *{username}* and stopped monitoring."
-
-
-def _handle_telegram_command(command_text: str, chat_id: Any) -> Optional[str]:
-    chat_key = _normalize_telegram_chat_id(chat_id)
-    cmd = command_text.strip().split()[0].lower()
-    # Telegram may send commands with bot mention suffix, e.g. /start@my_bot
-    cmd = cmd.split("@", 1)[0]
-    if cmd == "/start":
-        TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
-        return "Bot is online. Use /help.\nTip: tap /add or /remove, then send username or profile URL."
-    if cmd == "/help":
-        return (
-            "*Commands*\n"
-            "/status - Show monitor health summary\n"
-            "/lasterror - Show latest runtime/fetch error\n"
-            "/targets - List configured targets\n"
-            "/add [username|url] - Add target (or tap /add, then send username/URL)\n"
-            "/remove [username|url] - Remove target (or tap /remove, then send username/URL)\n"
-            "/cancel - Cancel pending add/remove prompt\n"
-            "/recheck - Trigger recheck for active targets\n"
-            "/stop - Stop all active monitors\n"
-            "/resume - Resume monitors for configured targets"
-        )
-    if cmd == "/status":
-        return _format_telegram_status_text()
-    if cmd == "/lasterror":
-        return _format_last_runtime_error_text()
-    if cmd == "/targets":
-        if not TELEGRAM_TARGETS:
-            return "No targets configured."
-        return "*Configured targets:*\n" + "\n".join(f"• {u}" for u in TELEGRAM_TARGETS)
-    if cmd == "/cancel":
-        if TELEGRAM_PENDING_ACTIONS.pop(chat_key, None):
-            return "Cancelled pending command."
-        return "Nothing to cancel."
-    if cmd == "/add":
-        parts = command_text.strip().split()
-        if len(parts) < 2:
-            TELEGRAM_PENDING_ACTIONS[chat_key] = "add"
-            return "Send Instagram username or profile URL to add.\nExample: `nasa` or `https://instagram.com/nasa/`"
-        username = _extract_instagram_username(" ".join(parts[1:]))
-        if not username:
-            return "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
-        TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
-        return _telegram_add_target(username)
-
-    if cmd == "/remove":
-        parts = command_text.strip().split()
-        if len(parts) < 2:
-            TELEGRAM_PENDING_ACTIONS[chat_key] = "remove"
-            if TELEGRAM_TARGETS:
-                return "Send username or profile URL to remove.\nConfigured targets:\n" + "\n".join(f"• {u}" for u in TELEGRAM_TARGETS)
-            return "No targets configured to remove."
-        username = _extract_instagram_username(" ".join(parts[1:]))
-        if not username:
-            return "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
-        TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
-        return _telegram_remove_target(username)
-
-    if cmd == "/recheck":
-        ok = recheck_all_targets()
-        return "Recheck requested." if ok else "Recheck could not run (no active targets)."
-    if cmd == "/stop":
-        for username in list(WEB_DASHBOARD_STOP_EVENTS.keys()):
-            stop_monitoring_for_target(username)
-        return "Stop requested for all active targets."
-    if cmd == "/resume":
-        started_any = False
-        if WEB_DASHBOARD_DATA.get('targets'):
-            start_all_monitoring()
-            started_any = True
-        else:
-            for idx, username in enumerate(TELEGRAM_TARGETS):
-                if username in WEB_DASHBOARD_MONITOR_THREADS and WEB_DASHBOARD_MONITOR_THREADS[username].is_alive():
-                    continue
-                delay = idx * max(1, int(INSTA_CHECK_INTERVAL / max(1, len(TELEGRAM_TARGETS))))
-                start_monitoring_for_target(username, delay_s=delay)
-                started_any = True
-        return "Resume requested for configured targets." if started_any else "No targets available to resume."
-    return "Unknown command. Use /help."
-
-
-def _telegram_default_reply_markup() -> Dict[str, Any]:
-    return {
-        "keyboard": [
-            [{"text": "/status"}, {"text": "/lasterror"}],
-            [{"text": "/targets"}],
-            [{"text": "/add "}, {"text": "/remove "}],
-            [{"text": "/recheck"}, {"text": "/resume"}, {"text": "/stop"}],
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-    }
-
-
-def start_telegram_bot_loop():
-    global TELEGRAM_BOT_THREAD, TELEGRAM_BOT_STOP_EVENT, TELEGRAM_BOT_LAST_UPDATE_ID
-    if not _telegram_commands_enabled():
-        return False
-    if TELEGRAM_BOT_THREAD and TELEGRAM_BOT_THREAD.is_alive():
-        return True
-
-    TELEGRAM_BOT_STOP_EVENT = threading.Event()
-    TELEGRAM_BOT_LAST_UPDATE_ID = 0
-
-    def _runner():
-        global TELEGRAM_BOT_LAST_UPDATE_ID
-        token = str(TELEGRAM_BOT_TOKEN).strip()
-        get_updates_url = f"https://api.telegram.org/bot{token}/getUpdates"
-        delete_webhook_url = f"https://api.telegram.org/bot{token}/deleteWebhook"
-
-        # Ensure long polling works even if a webhook was previously configured.
-        try:
-            req.get(delete_webhook_url, params={"drop_pending_updates": False}, timeout=10)
-        except Exception:
-            pass
-
-        if TELEGRAM_CHAT_ID:
-            send_telegram_message("Instagram monitor bot started.", notification_type="status")
-        else:
-            print("* Telegram bot polling started. Waiting for first /start to bind admin chat.")
-
-        while TELEGRAM_BOT_STOP_EVENT and not TELEGRAM_BOT_STOP_EVENT.is_set():
-            try:
-                params = {
-                    "timeout": 20,
-                    "offset": TELEGRAM_BOT_LAST_UPDATE_ID + 1
-                }
-                response = req.get(get_updates_url, params=params, timeout=25)
-                if response.status_code != 200:
-                    if response.status_code == 409:
-                        print("* Telegram polling conflict (HTTP 409). Clearing webhook and retrying.")
-                        try:
-                            req.get(delete_webhook_url, params={"drop_pending_updates": False}, timeout=10)
-                        except Exception:
-                            pass
-                    else:
-                        debug_print(f"* Telegram polling error: HTTP {response.status_code} - {response.text[:200]}")
-                    time.sleep(2)
-                    continue
-
-                payload = response.json()
-                if not isinstance(payload, dict) or not payload.get("ok"):
-                    time.sleep(1)
-                    continue
-
-                for item in payload.get("result", []):
-                    update_id = int(item.get("update_id", 0))
-                    if update_id > TELEGRAM_BOT_LAST_UPDATE_ID:
-                        TELEGRAM_BOT_LAST_UPDATE_ID = update_id
-
-                    message = item.get("message", {}) or {}
-                    chat = message.get("chat", {}) or {}
-                    chat_id = chat.get("id")
-                    text = str(message.get("text", "")).strip()
-                    if not _telegram_admin_authorized(chat_id):
-                        continue
-
-                    reply = None
-                    chat_key = _normalize_telegram_chat_id(chat_id)
-                    if text.startswith("/"):
-                        reply = _handle_telegram_command(text, chat_id)
-                    else:
-                        pending_action = TELEGRAM_PENDING_ACTIONS.get(chat_key)
-                        if pending_action == "add":
-                            username = _extract_instagram_username(text)
-                            if username:
-                                TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
-                                reply = _telegram_add_target(username)
-                            else:
-                                reply = "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
-                        elif pending_action == "remove":
-                            username = _extract_instagram_username(text)
-                            if username:
-                                TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
-                                reply = _telegram_remove_target(username)
-                            else:
-                                reply = "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
-
-                    if reply:
-                        send_telegram_message(
-                            reply,
-                            notification_type="status",
-                            chat_id_override=chat_id,
-                            reply_markup=_telegram_default_reply_markup(),
-                        )
-            except Exception as e:
-                debug_print(f"* Telegram polling loop error: {e}")
-                time.sleep(2)
-
-    TELEGRAM_BOT_THREAD = threading.Thread(target=_runner, daemon=True, name="telegram_bot")
-    TELEGRAM_BOT_THREAD.start()
-    return True
-
-
-def stop_telegram_bot_loop():
-    global TELEGRAM_BOT_STOP_EVENT, TELEGRAM_BOT_THREAD
-    if TELEGRAM_BOT_STOP_EVENT:
-        TELEGRAM_BOT_STOP_EVENT.set()
-    if TELEGRAM_BOT_THREAD and TELEGRAM_BOT_THREAD.is_alive():
-        TELEGRAM_BOT_THREAD.join(timeout=3.0)
 
 
 # Starts the Flask web server in a background thread
@@ -3369,7 +2951,6 @@ def signal_handler(sig, frame, message=None):
     if WEB_DASHBOARD_STOP_EVENTS:
         for username in list(WEB_DASHBOARD_STOP_EVENTS.keys()):
             stop_monitoring_for_target(username)
-    stop_telegram_bot_loop()
 
     sys.stdout = stdout_bck
     if message is None:
@@ -3610,99 +3191,6 @@ def validate_webhook_url(url):
         return False
 
 
-def _normalize_telegram_chat_id(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _telegram_channel_enabled(notification_type: str = "status") -> bool:
-    if not TELEGRAM_ENABLED:
-        return False
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    if notification_type == "status" and not TELEGRAM_STATUS_NOTIFICATION:
-        return False
-    if notification_type == "followers" and not TELEGRAM_FOLLOWERS_NOTIFICATION:
-        return False
-    if notification_type == "error" and not TELEGRAM_ERROR_NOTIFICATION:
-        return False
-    return True
-
-
-def send_telegram_message(
-    text: str,
-    notification_type: str = "status",
-    parse_mode: str = "Markdown",
-    chat_id_override: Optional[Any] = None,
-    reply_markup: Optional[Dict[str, Any]] = None,
-) -> int:
-    if chat_id_override is None:
-        if not _telegram_channel_enabled(notification_type):
-            return 1
-    else:
-        if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN:
-            return 1
-
-    token = str(TELEGRAM_BOT_TOKEN).strip()
-    chat_id = _normalize_telegram_chat_id(chat_id_override if chat_id_override is not None else TELEGRAM_CHAT_ID)
-    if not token or not chat_id:
-        debug_print("* Telegram error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
-        return 1
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text[:4096],
-        "disable_web_page_preview": True
-    }
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-
-    max_retries = 3
-    retry_delay = 2
-    for attempt in range(max_retries):
-        try:
-            response = req.post(url, json=payload, timeout=10)
-            if response.status_code == 200:
-                debug_print("* Telegram notification sent successfully")
-                return 0
-
-            if response.status_code == 429 and attempt < max_retries - 1:
-                debug_print(f"* Telegram rate limited, retrying in {retry_delay}s")
-                time.sleep(retry_delay)
-                continue
-
-            debug_print(f"* Telegram error: HTTP {response.status_code} - {response.text[:200]}")
-            return 1
-        except (req.exceptions.RequestException, req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
-            if attempt < max_retries - 1:
-                debug_print(f"* Telegram attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s...")
-                time.sleep(retry_delay)
-                continue
-            debug_print(f"* Telegram request failed: {e}")
-            return 1
-        except Exception as e:
-            debug_print(f"* Unexpected Telegram send error: {e}")
-            return 1
-    return 1
-
-
-def build_notification_text(title: str, description: str, fields=None) -> str:
-    lines = [f"*{title}*", str(description or "").strip()]
-    if fields:
-        for field in fields:
-            field_name = str(field.get("name", "")).strip()
-            field_value = str(field.get("value", "")).strip()
-            if field_name and field_value:
-                lines.append(f"• *{field_name}:* {field_value}")
-            elif field_value:
-                lines.append(f"• {field_value}")
-    return "\n".join([line for line in lines if line])
-
-
 # Escapes Discord markdown for display-only text
 def escape_discord_markdown(text: str) -> str:
     if not text:
@@ -3847,30 +3335,25 @@ def format_payload(template, payload):
     return template
 
 
-def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None, local_image_file=None, notification_type="status", dispatch_telegram=True):
-    webhook_active = bool(WEBHOOK_ENABLED and WEBHOOK_URL)
-    if webhook_active and not validate_webhook_url(WEBHOOK_URL):
+def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None, local_image_file=None, notification_type="status"):
+    if not WEBHOOK_ENABLED or not WEBHOOK_URL:
+        return 1
+
+    # Validate webhook URL
+    if not validate_webhook_url(WEBHOOK_URL):
         debug_print("* Webhook error: Invalid webhook URL format")
-        webhook_active = False
+        return 1
 
+    # Check if this notification type is enabled
     if notification_type == "status" and not WEBHOOK_STATUS_NOTIFICATION:
-        webhook_active = False
+        return 1
     elif notification_type == "followers" and not WEBHOOK_FOLLOWERS_NOTIFICATION:
-        webhook_active = False
+        return 1
     elif notification_type == "error" and not WEBHOOK_ERROR_NOTIFICATION:
-        webhook_active = False
-
-    telegram_result = 1
-    if dispatch_telegram:
-        telegram_text = build_notification_text(str(title or "Instagram Monitor"), str(description or ""), fields=fields)
-        telegram_result = send_telegram_message(telegram_text, notification_type=notification_type)
-
-    if not webhook_active:
-        return 0 if telegram_result == 0 else 1
+        return 1
 
     max_retries = 3
     retry_delay = 2
-    webhook_result = 1
 
     for attempt in range(max_retries):
         try:
@@ -3954,14 +3437,12 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
 
             if response.status_code in (200, 204):
                 print("* Webhook notification sent successfully")
-                webhook_result = 0
-                break
+                return 0
             else:
                 print(f"* Webhook error: HTTP {response.status_code} - {response.text[:200]}")
                 # Don't retry on client errors (4xx) unless it's 429
                 if response.status_code != 429:
-                    webhook_result = 1
-                    break
+                    return 1
 
         except (req.exceptions.RequestException, req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
             if attempt < max_retries - 1:
@@ -3970,15 +3451,11 @@ def send_webhook(title, description, color=0x7289DA, fields=None, image_url=None
                 continue
             else:
                 print(f"* Error sending webhook: {e}")
-                webhook_result = 1
-                break
+                return 1
         except Exception as e:
             print(f"* Unexpected error sending webhook: {e}")
-            webhook_result = 1
-            break
+            return 1
 
-    if webhook_result == 0 or telegram_result == 0:
-        return 0
     return 1
 
 
@@ -4684,8 +4161,148 @@ def detect_changed_profile_picture(user, profile_image_url, profile_pic_file, pr
 
 
 # Builds a Profile object from the mobile web_profile_info response
+def _normalize_instagram_username(username: str) -> str:
+    return str(username or "").strip().lstrip("@")
+
+
+def _parse_public_profile_count(value: str) -> int:
+    raw = str(value or "").strip().replace(",", "")
+    if not raw:
+        return 0
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([KMB])?", raw, flags=re.IGNORECASE)
+    if not m:
+        digits = re.sub(r"\D", "", raw)
+        return int(digits) if digits else 0
+    number = float(m.group(1))
+    suffix = (m.group(2) or "").upper()
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1)
+    return int(number * multiplier)
+
+
+def _known_or_none(value: Any, known: bool) -> Any:
+    return value if known else None
+
+
+def _display_value(value: Any, known: bool, unknown_text: str = "Unknown") -> str:
+    return str(value) if known else unknown_text
+
+
+_FALLBACK_USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_1) AppleWebKit/602.2.14 (KHTML, like Gecko) Version/10.0.1 Safari/602.2.14',
+    'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.98 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.98 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; WOW64; rv:50.0) Gecko/20100101 Firefox/50.0',
+]
+
+
+def _fetch_public_profile_metadata(username: str) -> Optional[SimpleNamespace]:
+    normalized_username = _normalize_instagram_username(username)
+    if not normalized_username:
+        return None
+
+    ua = random.choice(_FALLBACK_USER_AGENTS)
+    try:
+        response = req.get(
+            f"https://www.instagram.com/{normalized_username}/",
+            headers={"User-Agent": ua},
+            timeout=20,
+            allow_redirects=True,
+        )
+    except Exception:
+        return None
+
+    if not response.text:
+        return None
+
+    # Use BeautifulSoup for proper HTML entity decoding (like InstagramOSINT);
+    # fall back to regex + html.unescape if bs4 is unavailable
+    og_description = ""
+    og_title = ""
+    og_image = ""
+
+    if BeautifulSoup is not None:
+        soup = BeautifulSoup(response.text, "html.parser")
+        og_desc_tag = soup.find("meta", attrs={"property": "og:description"})
+        og_title_tag = soup.find("meta", attrs={"property": "og:title"})
+        og_image_tag = soup.find("meta", attrs={"property": "og:image"})
+
+        if response.status_code != 200 or og_desc_tag is None:
+            return None
+
+        og_description = og_desc_tag.get("content", "") if og_desc_tag else ""
+        og_title = og_title_tag.get("content", "") if og_title_tag else ""
+        og_image = og_image_tag.get("content", "") if og_image_tag else ""
+    else:
+        if response.status_code != 200:
+            return None
+        html_text = response.text
+        for prop, setter in [("og:description", "desc"), ("og:title", "title"), ("og:image", "image")]:
+            pattern = rf'<meta[^>]+property=["\']{ re.escape(prop)}["\'][^>]+content=["\']([^"\']*)["\']'
+            m = re.search(pattern, html_text, flags=re.IGNORECASE)
+            val = unescape(m.group(1).strip()) if m else ""
+            if setter == "desc":
+                og_description = val
+            elif setter == "title":
+                og_title = val
+            elif setter == "image":
+                og_image = val
+        if not og_description:
+            return None
+
+    count_match = re.match(
+        r"([\d,.]+[KMB]?)\s+Followers,\s+([\d,.]+[KMB]?)\s+Following,\s+([\d,.]+[KMB]?)\s+Posts",
+        og_description,
+        flags=re.IGNORECASE,
+    )
+    followers = _parse_public_profile_count(count_match.group(1)) if count_match else 0
+    followees = _parse_public_profile_count(count_match.group(2)) if count_match else 0
+    mediacount = _parse_public_profile_count(count_match.group(3)) if count_match else 0
+
+    name_match = re.search(r"videos from (.+?) \(@", og_description)
+    if name_match:
+        full_name = name_match.group(1).strip()
+    elif og_title:
+        cleaned = og_title.replace("(@" + normalized_username + ")", "")
+        cleaned = cleaned.replace("\u2022 Instagram photos and videos", "").strip()
+        full_name = cleaned
+    else:
+        full_name = ""
+
+    is_verified = "verified" in og_description.lower()
+
+    return SimpleNamespace(
+        username=normalized_username,
+        full_name=full_name,
+        followers=followers,
+        followees=followees,
+        mediacount=mediacount,
+        biography="",
+        profile_pic_url=og_image,
+        profile_pic_url_no_iphone=og_image,
+        external_url="",
+        is_business_account=False,
+        business_category_name="",
+        is_private=False,
+        is_verified=is_verified,
+        followed_by_viewer=False,
+        has_public_story=False,
+        userid=0,
+        _public_metadata_fallback=True,
+        _counts_known=bool(count_match),
+        _bio_known=False,
+        _privacy_known=False,
+    )
+
+
 def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) -> Optional[instaloader.Profile]:
-    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={username}", {})
+    normalized_username = _normalize_instagram_username(username)
+    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={normalized_username}", {})
     if not isinstance(data, dict):
         return None
 
@@ -4695,7 +4312,7 @@ def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) 
 
     normalized = dict(user_data)
     if "username" not in normalized:
-        normalized["username"] = username
+        normalized["username"] = normalized_username
     if "id" not in normalized and "pk" in normalized:
         normalized["id"] = str(normalized["pk"])
     if "pk" not in normalized and "id" in normalized:
@@ -4706,20 +4323,28 @@ def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) 
     return instaloader.Profile(bot.context, normalized)
 
 
-# Resolves a profile by username by trying web_profile_info first then Instaloader's GraphQL.
-# When anonymous, the mobile API is aggressively rate-limited so we wrap the attempt
-# and fall through quickly on failure instead of waiting for instaloader's 30-min retry.
+# Resolves a profile by username by trying instaloader first, then graceful public fallbacks.
 def profile_from_username_resilient(bot: instaloader.Instaloader, username: str) -> instaloader.Profile:
+    normalized_username = _normalize_instagram_username(username)
     ctx = bot.context
-    if not ctx.is_logged_in:
-        try:
-            fallback_profile = _profile_from_web_profile_info(bot, username)
-            if fallback_profile is not None:
-                return fallback_profile
-        except Exception as e:
-            debug_print(f"web_profile_info failed for {username}, falling back to GraphQL: {e}")
+    try:
+        return instaloader.Profile.from_username(ctx, normalized_username)
+    except Exception as primary_exc:
+        if not ctx.is_logged_in:
+            try:
+                fallback_profile = _profile_from_web_profile_info(bot, normalized_username)
+                if fallback_profile is not None:
+                    return fallback_profile
+            except Exception:
+                pass
 
-    return instaloader.Profile.from_username(ctx, username)
+            try:
+                public_profile = _fetch_public_profile_metadata(normalized_username)
+                if public_profile is not None:
+                    return public_profile  # type: ignore[return-value]
+            except Exception:
+                pass
+        raise primary_exc
 
 
 # Return the most recent post and/or reel for the user (GraphQL helper when logged in)
@@ -4755,7 +4380,10 @@ def latest_post_mobile(user: str, bot: instaloader.Instaloader):
         video_url: Optional[str]
         mediaid: str
 
-    data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={user}", {})
+    try:
+        data = bot.context.get_iphone_json(f"api/v1/users/web_profile_info/?username={_normalize_instagram_username(user)}", {})
+    except Exception:
+        return None
 
     if not isinstance(data, dict):
         raise RuntimeError(f"Instagram returned unexpected response type: {type(data).__name__}")
@@ -4847,6 +4475,9 @@ def get_total_reels_count(user: str, bot: instaloader.Instaloader, skip_session=
             return get_reels_count_mobile(user, bot)
         except Exception:
             pass
+
+    if not bot.context.is_logged_in:
+        return 0
 
     # Anonymous fallback: count every reel in the feed, might be API intensive
     try:
@@ -6627,11 +6258,6 @@ def get_dashboard_config_data(final_log_path=None, imgcat_exe=None, profile_pic_
         'webhook_status': WEBHOOK_STATUS_NOTIFICATION,
         'webhook_followers': WEBHOOK_FOLLOWERS_NOTIFICATION,
         'webhook_errors': WEBHOOK_ERROR_NOTIFICATION,
-        'telegram_enabled': TELEGRAM_ENABLED,
-        'telegram_chat_id': TELEGRAM_CHAT_ID,
-        'telegram_status': TELEGRAM_STATUS_NOTIFICATION,
-        'telegram_followers': TELEGRAM_FOLLOWERS_NOTIFICATION,
-        'telegram_errors': TELEGRAM_ERROR_NOTIFICATION,
         'email_notifications': STATUS_NOTIFICATION,
         'follower_notifications': FOLLOWERS_NOTIFICATION,
         'error_notifications': ERROR_NOTIFICATION
@@ -6877,7 +6503,7 @@ def simulate_human_actions(bot: instaloader.Instaloader, sleep_seconds: int) -> 
 
 # Monitors activity of the specified Instagram user
 def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, skip_followings, skip_getting_story_details, skip_getting_posts_details, get_more_post_details, wait_for_prev_user=None, signal_loading_complete=None, stop_event=None, user_root_path=None, manual_recheck=False, skip_follow_changes=False):  # type: ignore[reportComplexity]
-    global pbar, DASHBOARD_DATA, VERBOSE_MODE, CHECK_COUNT, SESSION_USERNAME
+    global pbar, DASHBOARD_DATA, VERBOSE_MODE, CHECK_COUNT
     _thread_local.user = user  # Store user in thread-local storage for debug_print
     _thread_local.in_partial_line = False  # Track partial line prints
     update_ui_data(targets={user: {'status': 'Starting'}})
@@ -6927,11 +6553,12 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         if ENABLE_JITTER or MULTI_TARGET_SERIALIZE_HTTP:
             ensure_requests_monkey_patched()
 
+        anonymous_mode = bool(skip_session or not SESSION_USERNAME)
         bot = instaloader.Instaloader(
             user_agent=USER_AGENT,
             iphone_support=True,
             quiet=True,
-            max_connection_attempts=1 if skip_session else 3
+            max_connection_attempts=1 if anonymous_mode else 3,
         )
 
         ctx = bot.context
@@ -6940,34 +6567,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         session = ctx._session
 
-        cookie_auth_active = False
-
-        if not skip_session and INSTAGRAM_SESSIONID:
-            try:
-                cookie_dict = {"sessionid": INSTAGRAM_SESSIONID}
-                if INSTAGRAM_CSRFTOKEN:
-                    cookie_dict["csrftoken"] = INSTAGRAM_CSRFTOKEN
-                bot.context._session.cookies.update(cookie_dict)
-                cookie_username = bot.test_login()
-                if not cookie_username:
-                    raise RuntimeError("Cookie auth failed (sessionid may be expired)")
-                if not SESSION_USERNAME:
-                    SESSION_USERNAME = str(cookie_username)
-                with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
-                    WEB_DASHBOARD_DATA['session']['active'] = True
-                    WEB_DASHBOARD_DATA['session']['username'] = SESSION_USERNAME
-                log_activity("Instagram cookie session auth successful", user=SESSION_USERNAME, level='system')
-                cookie_auth_active = True
-            except Exception as e:
-                error_msg = format_error_message(e)
-                print(f"* Session cookie auth error for {user}: {error_msg}")
-                print_cur_ts("\nTimestamp:\t\t\t\t")
-                log_activity(f"Session cookie auth error: {error_msg}", user=user)
-                if threading.current_thread() is threading.main_thread():
-                    sys.exit(1)
-                return
-
-        if not skip_session and SESSION_USERNAME and not cookie_auth_active:
+        if not skip_session and SESSION_USERNAME:
             try:
                 # Session file is shared - avoid concurrent load/login/save in multi-target mode
                 with SESSION_FILE_LOCK:
@@ -7000,7 +6600,6 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
             except Exception as e:
                 error_msg = format_error_message(e)
-                _set_last_runtime_error(error_msg, user=user, source="session")
                 print(f"* Session error for {user}: {error_msg}")
                 print_cur_ts("\nTimestamp:\t\t\t\t")
                 log_activity(f"Session error: {error_msg}", user=user)
@@ -7128,6 +6727,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         followed_by_viewer = profile.followed_by_viewer
         can_view = (not is_private) or followed_by_viewer
         posts_count = profile.mediacount
+        counts_known = bool(getattr(profile, "_counts_known", True))
+        bio_known = bool(getattr(profile, "_bio_known", True))
+        privacy_known = bool(getattr(profile, "_privacy_known", True))
         if not skip_session and can_view:
             update_ui_data(targets={user: {'status': 'Fetching Reels'}})
             _thread_local.in_partial_line = True
@@ -7177,38 +6779,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     except Exception as e:
         _thread_local.in_partial_line = False
         error_msg = format_error_message(e)
-        _set_last_runtime_error(error_msg, user=user, source="monitor")
-        err_lower = error_msg.lower()
-        is_rate_limited = "429" in err_lower or "too many requests" in err_lower
-        is_checkpoint = "checkpoint" in err_lower or "challenge" in err_lower
         print(f"* Error: {error_msg}")
         print_cur_ts("\nTimestamp:\t\t\t\t")
         log_activity(f"Error: {error_msg}", user=user)
-
-        # On 429/checkpoint during initial load: back off then retry
-        # instead of killing the monitoring thread permanently.
-        if is_rate_limited or is_checkpoint:
-            backoff_s = 90 + random.randint(0, 60)
-            log_activity(f"Initial load rate-limited; backing off {display_time(backoff_s)} before retry", user=user, level='warning')
-            print(f"* Backing off {display_time(backoff_s)} before retrying initial load for {user}...")
-            if WEB_DASHBOARD_ENABLED:
-                resume_at = now_local_naive() + timedelta(seconds=backoff_s)
-                update_ui_data(targets={user: {'status': f'Rate-limited, retry at {resume_at.strftime("%H:%M:%S")}'}})
-
-            while backoff_s > 0:
-                if stop_event and stop_event.is_set():
-                    print(f"* Monitoring stopped for {user}\n")
-                    return
-                sleep_chunk = min(1, backoff_s)
-                if stop_event:
-                    stop_event.wait(sleep_chunk)
-                else:
-                    time.sleep(sleep_chunk)
-                backoff_s -= sleep_chunk
-
-            log_activity("Backoff complete, retrying initial profile load...", user=user, level='system')
-            print(f"* Retrying initial load for {user}...")
-            return instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, skip_followings, skip_getting_story_details, skip_getting_posts_details, get_more_post_details, wait_for_prev_user, signal_loading_complete, stop_event, user_root_path, manual_recheck)
 
         # Handle session recovery for automated checks/challenge errors
         if "detected automated checks" in error_msg and WEB_DASHBOARD_ENABLED:
@@ -7220,6 +6793,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             # Wait for session refresh or stop event
             while not (stop_event and stop_event.is_set()):
                 if SESSION_REFRESHED_EVENT.wait(timeout=1.0):
+                    # Session refreshed! Reload and retry
                     # Session refreshed! Reload and retry
                     log_activity("Session/Mode change detected, resuming monitoring...", user=user)
                     print(f"* Session/Mode change detected for {user}, resuming...")
@@ -7268,10 +6842,10 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         print(f"User ID:\t\t\t\t{insta_userid}")
         print(f"URL:\t\t\t\t\thttps://www.instagram.com/{insta_username}/")
 
-        print(f"\nProfile:\t\t\t\t{'public' if not is_private else 'private'}")
-        print(f"Can view all contents:\t\t\t{'Yes' if can_view else 'No'}")
+        print(f"\nProfile:\t\t\t\t{_display_value('public' if not is_private else 'private', privacy_known)}")
+        print(f"Can view all contents:\t\t\t{_display_value('Yes' if can_view else 'No', privacy_known)}")
 
-        print(f"\nPosts:\t\t\t\t\t{posts_count}")
+        print(f"\nPosts:\t\t\t\t\t{_display_value(posts_count, counts_known)}")
         if not skip_session and can_view:
             print(f"Reels:\t\t\t\t\t{reels_count}")
 
@@ -7279,28 +6853,29 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
             print(f"\nFollowers:\t\t\t\t- (to be determined later)")
             print(f"Followings:\t\t\t\t- (to be determined later)")
         else:
-            print(f"\nFollowers:\t\t\t\t{followers_count}")
-            print(f"Followings:\t\t\t\t{followings_count}")
+            print(f"\nFollowers:\t\t\t\t{_display_value(followers_count, counts_known)}")
+            print(f"Followings:\t\t\t\t{_display_value(followings_count, counts_known)}")
 
         if bot.context.is_logged_in:
             print(f"\nStory available:\t\t\t{has_story}")
 
-        print(f"\nBio:\n\n{bio}\n")
+        print(f"\nBio:\n\n{_display_value(bio, bio_known)}\n")
         print_cur_ts("Timestamp:\t\t\t\t")
 
     # Populate initial Dashboard data immediately after first fetch (regardless of print mode)
     target_data_unified = {
-        'followers': None if FOLLOWERS_CHURN_DETECTION else followers_count,
-        'following': None if FOLLOWERS_CHURN_DETECTION else followings_count,
-        'posts': posts_count,
+        'followers': None if FOLLOWERS_CHURN_DETECTION else _known_or_none(followers_count, counts_known),
+        'following': None if FOLLOWERS_CHURN_DETECTION else _known_or_none(followings_count, counts_known),
+        'posts': _known_or_none(posts_count, counts_known),
         'reels': reels_count,
         'has_story': has_story,
         'stories_count': 0,  # Initial count
-        'is_private': is_private,
+        'is_private': _known_or_none(is_private, privacy_known),
         'status': 'OK',
         'bio_changed': False,
         'last_post': None,
-        'last_story': None
+        'last_story': None,
+        'bio': _known_or_none(bio, bio_known),
     }
 
     # Use unified config data (reuse existing or fallback if not init)
@@ -8127,6 +7702,9 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 followed_by_viewer = profile.followed_by_viewer
                 can_view = (not is_private) or followed_by_viewer
                 posts_count = profile.mediacount
+                counts_known = bool(getattr(profile, "_counts_known", True))
+                bio_known = bool(getattr(profile, "_bio_known", True))
+                privacy_known = bool(getattr(profile, "_privacy_known", True))
 
                 debug_print(f"Profile loaded: followers={followers_count}, following={followings_count}, posts={posts_count}")
                 consecutive_main_errors = 0
@@ -8154,13 +7732,14 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                 # Prepare target data for both Dashboard and Web Dashboard
                 target_data = {
                     user: {
-                        'followers': followers_count,
-                        'following': followings_count,
-                        'posts': posts_count,
+                        'followers': _known_or_none(followers_count, counts_known),
+                        'following': _known_or_none(followings_count, counts_known),
+                        'posts': _known_or_none(posts_count, counts_known),
                         'reels': reels_count if ('reels_count' in dir() and reels_count is not None) else 0,
                         'has_story': has_story,
-                        'is_private': is_private,
-                        'bio_changed': False
+                        'is_private': _known_or_none(is_private, privacy_known),
+                        'bio_changed': False,
+                        'bio': _known_or_none(bio, bio_known),
                     }
                 }
                 config_data = {
@@ -9399,9 +8978,8 @@ def get_target_paths(user):
 
 
 def run_main():
-    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, INSTAGRAM_SESSIONID, INSTAGRAM_CSRFTOKEN, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER
+    global CLI_CONFIG_PATH, DOTENV_FILE, LOCAL_TIMEZONE, LIVENESS_CHECK_COUNTER, SESSION_USERNAME, SESSION_PASSWORD, CSV_FILE, DISABLE_LOGGING, INSTA_LOGFILE, OUTPUT_DIR, STATUS_NOTIFICATION, FOLLOWERS_NOTIFICATION, ERROR_NOTIFICATION, INSTA_CHECK_INTERVAL, DETECT_CHANGED_PROFILE_PIC, RANDOM_SLEEP_DIFF_LOW, RANDOM_SLEEP_DIFF_HIGH, imgcat_exe, SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_FOLLOW_CHANGES, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, SMTP_PASSWORD, stdout_bck, PROFILE_PIC_FILE_EMPTY, USER_AGENT, USER_AGENT_MOBILE, BE_HUMAN, ENABLE_JITTER
     global DEBUG_MODE, VERBOSE_MODE, HOURS_VERBOSE, DASHBOARD_MODE, DASHBOARD_ENABLED, WEB_DASHBOARD_ENABLED, FOLLOWERS_CHURN_DETECTION, WEBHOOK_ENABLED, WEBHOOK_URL, WEBHOOK_STATUS_NOTIFICATION, WEBHOOK_FOLLOWERS_NOTIFICATION, WEBHOOK_ERROR_NOTIFICATION, DASHBOARD_CONSOLE, DASHBOARD_DATA, FOLLOWERS_CHURN_AUTODISABLED, FOLLOWERS_CHURN_AUTODISABLED_REASON
-    global TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_STATUS_NOTIFICATION, TELEGRAM_FOLLOWERS_NOTIFICATION, TELEGRAM_ERROR_NOTIFICATION, TELEGRAM_TARGETS
     global WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT, WEB_DASHBOARD_TEMPLATE_DIR, mode_of_the_tool, DOWNLOAD_THUMBNAILS, THUMBNAILS_FORCED_BY_WEB, COLORED_OUTPUT, COLOR_THEME, TIME_FORMAT_12H
 
     if "--generate-config" in sys.argv:
@@ -9506,20 +9084,6 @@ def run_main():
         metavar="SESSION_PASSWORD",
         type=str,
         help="Instagram password for session login (recommended to use saved session)"
-    )
-    creds.add_argument(
-        "--sessionid",
-        dest="instagram_sessionid",
-        metavar="SESSIONID",
-        type=str,
-        help="Instagram sessionid cookie value (alternative auth mode for headless environments)"
-    )
-    creds.add_argument(
-        "--csrftoken",
-        dest="instagram_csrftoken",
-        metavar="CSRFTOKEN",
-        type=str,
-        help="Instagram csrftoken cookie value (recommended with --sessionid)"
     )
 
     # Notifications
@@ -9847,63 +9411,6 @@ def run_main():
         help="Send test webhook notification to verify settings"
     )
 
-    telegram_grp = parser.add_argument_group("Telegram notifications and bot commands")
-    telegram_grp.add_argument(
-        "--telegram",
-        dest="telegram_enabled",
-        action="store_true",
-        default=None,
-        help="Enable Telegram notifications and command polling"
-    )
-    telegram_grp.add_argument(
-        "--no-telegram",
-        dest="no_telegram",
-        action="store_true",
-        default=None,
-        help="Disable Telegram notifications and command polling"
-    )
-    telegram_grp.add_argument(
-        "--telegram-bot-token",
-        dest="telegram_bot_token",
-        metavar="TOKEN",
-        type=str,
-        help="Telegram bot token from @BotFather"
-    )
-    telegram_grp.add_argument(
-        "--telegram-chat-id",
-        dest="telegram_chat_id",
-        metavar="CHAT_ID",
-        type=str,
-        help="Allowed admin chat ID for Telegram bot commands"
-    )
-    telegram_grp.add_argument(
-        "--telegram-status",
-        dest="telegram_status",
-        action="store_true",
-        default=None,
-        help="Send Telegram alerts for status changes"
-    )
-    telegram_grp.add_argument(
-        "--telegram-followers",
-        dest="telegram_followers",
-        action="store_true",
-        default=None,
-        help="Send Telegram alerts for follower changes"
-    )
-    telegram_grp.add_argument(
-        "--telegram-errors",
-        dest="telegram_errors",
-        action="store_true",
-        default=None,
-        help="Send Telegram alerts for errors"
-    )
-    telegram_grp.add_argument(
-        "--send-test-telegram",
-        dest="send_test_telegram",
-        action="store_true",
-        help="Send test Telegram message to verify bot settings"
-    )
-
     # Firefox session import options
     import_grp = parser.add_argument_group("Firefox session import")
     import_grp.add_argument(
@@ -9998,18 +9505,11 @@ def run_main():
             if env_path:
                 print(f"* Warning: Cannot load dotenv file '{env_path}' because 'python-dotenv' is not installed\n\nTo install it, run:\n    pip3 install python-dotenv\n\nOnce installed, re-run this tool\n")
 
-    # Always honor process environment variables (e.g. Render dashboard env vars),
-    # regardless of whether a dotenv file was found.
-    for secret in SECRET_KEYS:
-        val = os.getenv(secret)
-        if val is not None:
-            globals()[secret] = val
-    telegram_chat_env = os.getenv("TELEGRAM_CHAT_ID")
-    if telegram_chat_env is not None:
-        TELEGRAM_CHAT_ID = _normalize_telegram_chat_id(telegram_chat_env)
-    telegram_enabled_env = os.getenv("TELEGRAM_ENABLED")
-    if telegram_enabled_env is not None:
-        TELEGRAM_ENABLED = telegram_enabled_env.strip().lower() in ("1", "true", "yes", "on")
+    if env_path:
+        for secret in SECRET_KEYS:
+            val = os.getenv(secret)
+            if val is not None:
+                globals()[secret] = val
 
     if args.import_firefox_session:
 
@@ -10103,28 +9603,6 @@ def run_main():
     if args.webhook_errors is True:
         WEBHOOK_ERROR_NOTIFICATION = True
 
-    if args.telegram_bot_token:
-        TELEGRAM_BOT_TOKEN = str(args.telegram_bot_token).strip()
-        TELEGRAM_ENABLED = True
-
-    if args.telegram_chat_id:
-        TELEGRAM_CHAT_ID = _normalize_telegram_chat_id(args.telegram_chat_id)
-
-    if args.telegram_enabled is True:
-        TELEGRAM_ENABLED = True
-
-    if args.no_telegram is True:
-        TELEGRAM_ENABLED = False
-
-    if args.telegram_status is True:
-        TELEGRAM_STATUS_NOTIFICATION = True
-
-    if args.telegram_followers is True:
-        TELEGRAM_FOLLOWERS_NOTIFICATION = True
-
-    if args.telegram_errors is True:
-        TELEGRAM_ERROR_NOTIFICATION = True
-
     if args.send_test_email:
         print("* Sending test email notification ...\n")
         m_subject = "instagram_monitor: test email"
@@ -10147,32 +9625,13 @@ def run_main():
         old_webhook_enabled = WEBHOOK_ENABLED
         WEBHOOK_ENABLED = True
 
-        if send_webhook("instagram_monitor: test webhook", "This is **test webhook** - your settings seems to be **correct** !", color=0x7289DA, dispatch_telegram=False) == 0:
+        if send_webhook("instagram_monitor: test webhook", "This is **test webhook** - your settings seems to be **correct** !", color=0x7289DA) == 0:
             print("* Webhook sent successfully !")
         else:
             print("* Error: Test webhook notification failed. Check the error message above.")
             sys.exit(1)
 
         WEBHOOK_ENABLED = old_webhook_enabled
-        sys.exit(0)
-
-    if args.send_test_telegram:
-        print("* Sending test Telegram notification ...")
-        if not TELEGRAM_BOT_TOKEN:
-            print("* Error: TELEGRAM_BOT_TOKEN is not set. Use --telegram-bot-token or set it in config/.env.")
-            sys.exit(1)
-        if not TELEGRAM_CHAT_ID:
-            print("* Error: TELEGRAM_CHAT_ID is not set. Use --telegram-chat-id or set it in config.")
-            sys.exit(1)
-
-        old_telegram_enabled = TELEGRAM_ENABLED
-        TELEGRAM_ENABLED = True
-        if send_telegram_message("instagram_monitor test message: settings look correct.", notification_type="status", parse_mode="") == 0:
-            print("* Telegram message sent successfully !")
-        else:
-            print("* Error: Test Telegram notification failed. Check configuration.")
-            sys.exit(1)
-        TELEGRAM_ENABLED = old_telegram_enabled
         sys.exit(0)
 
     # Resolve targets: CLI (positional + --targets) > config TARGET_USERNAMES
@@ -10199,22 +9658,7 @@ def run_main():
             seen.add(u)
             normalized.append(u)
     targets = sorted(normalized)
-    TELEGRAM_TARGETS = list(targets)
     DASHBOARD_DATA['targets_list'] = targets
-    with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
-        if 'targets' not in WEB_DASHBOARD_DATA:
-            WEB_DASHBOARD_DATA['targets'] = {}
-        for u in targets:
-            if u not in WEB_DASHBOARD_DATA['targets']:
-                WEB_DASHBOARD_DATA['targets'][u] = {
-                    'followers': None,
-                    'following': None,
-                    'posts': None,
-                    'reels': None,
-                    'status': 'Pending',
-                    'added': get_short_date_from_ts(datetime.now(), show_year=False, show_seconds=False),
-                    'last_checked': None
-                }
 
     # Terminal Dashboard handling
     # (Resolved early for header display, keeping structure for clarity)
@@ -10239,7 +9683,7 @@ def run_main():
         WEB_DASHBOARD_TEMPLATE_DIR = os.path.abspath(os.path.expanduser(args.web_dashboard_template_dir))
 
     # Allow empty targets with specific flags
-    if not targets and not WEB_DASHBOARD_ENABLED and not TELEGRAM_ENABLED:
+    if not targets and not WEB_DASHBOARD_ENABLED:
         utility_flags = {
             "--no-color", "-h", "--help",
             "--web-dashboard", "--version"
@@ -10294,13 +9738,7 @@ def run_main():
     if args.session_password:
         SESSION_PASSWORD = args.session_password
 
-    if args.instagram_sessionid:
-        INSTAGRAM_SESSIONID = str(args.instagram_sessionid).strip()
-
-    if args.instagram_csrftoken:
-        INSTAGRAM_CSRFTOKEN = str(args.instagram_csrftoken).strip()
-
-    if not SESSION_USERNAME and not INSTAGRAM_SESSIONID:
+    if not SESSION_USERNAME:
         SKIP_SESSION = True
 
     # Validate INSTA_CHECK_INTERVAL to prevent division by zero
@@ -10632,10 +10070,6 @@ def run_main():
     # Works for both Dashboard and Web Dashboard
     start_dashboard_input_handler()
 
-    if _telegram_commands_enabled():
-        start_telegram_bot_loop()
-        print("* Telegram bot command polling enabled")
-
     # Initialize Dashboard Live display if enabled
     if RICH_AVAILABLE and DASHBOARD_ENABLED and DASHBOARD_CONSOLE is not None:
         init_dashboard()
@@ -10686,7 +10120,7 @@ def run_main():
         # Integrated Mode Stop Event registration
         stop_event = threading.Event()
         user = targets[0]
-        if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED or _telegram_commands_enabled():
+        if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
             with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
                 WEB_DASHBOARD_STOP_EVENTS[user] = stop_event
                 WEB_DASHBOARD_RECHECK_EVENTS[user] = threading.Event()
@@ -10695,7 +10129,7 @@ def run_main():
         try:
             instagram_monitor_user(user, csv_files_by_user.get(user, CSV_FILE), SKIP_SESSION, SKIP_FOLLOWERS, SKIP_FOLLOWINGS, SKIP_GETTING_STORY_DETAILS, SKIP_GETTING_POSTS_DETAILS, GET_MORE_POST_DETAILS, user_root_path=OUTPUT_DIR, stop_event=stop_event, skip_follow_changes=SKIP_FOLLOW_CHANGES)
         finally:
-            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED or _telegram_commands_enabled():
+            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                 with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
                     WEB_DASHBOARD_STOP_EVENTS.pop(user, None)
                     WEB_DASHBOARD_RECHECK_EVENTS.pop(user, None)
@@ -10739,7 +10173,7 @@ def run_main():
             debug_print(f"Target {u} scheduled with delay_s={delay}")
 
             # Populate initial dashboard check times
-            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED or _telegram_commands_enabled():
+            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                 update_check_times(next_time=planned, user=u, increment_count=False)
 
         print_cur_ts("\nTimestamp:\t\t\t\t")
@@ -10756,7 +10190,7 @@ def run_main():
             try:
                 # Register recheck event and thread early for dashboard visibility/control
                 recheck_event = threading.Event()
-                if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED or _telegram_commands_enabled():
+                if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                     with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
                         WEB_DASHBOARD_RECHECK_EVENTS[u] = recheck_event
                         WEB_DASHBOARD_MONITOR_THREADS[u] = threading.current_thread()
@@ -10830,7 +10264,7 @@ def run_main():
         threads = []
         for idx, (u, delay, _planned) in enumerate(planned_actions):
             stop_event = threading.Event()
-            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED or _telegram_commands_enabled():
+            if DASHBOARD_ENABLED or WEB_DASHBOARD_ENABLED:
                 WEB_DASHBOARD_STOP_EVENTS[u] = stop_event
 
             t = threading.Thread(target=_runner, args=(u, delay, idx, stop_event), name=f"instagram_monitor:{u}", daemon=True)
@@ -10873,7 +10307,6 @@ def main():
     except Exception as e:
         # Critical error handling
         error_trace = traceback.format_exc()
-        _set_last_runtime_error(str(e), source="critical")
 
         # Stop Terminal Dashboard so we can see the error
         if DASHBOARD_LIVE:

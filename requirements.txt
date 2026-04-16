@@ -1,5 +1,6 @@
 instaloader
 requests
+beautifulsoup4
 python-dateutil
 pytz
 tzlocal
