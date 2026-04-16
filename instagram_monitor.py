@@ -364,7 +364,7 @@ WEB_DASHBOARD_ENABLED = False
 WEB_DASHBOARD_PORT = 8000
 
 # Host for the web dashboard server (use '0.0.0.0' to allow external access)
-WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', '127.0.0.1')
+WEB_DASHBOARD_HOST = '127.0.0.1'
 
 # Template directory for web dashboard
 # If empty, the tool will auto-detect the templates directory in this order:
