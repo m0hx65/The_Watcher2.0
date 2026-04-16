@@ -6938,6 +6938,8 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
 
         session = ctx._session
 
+        cookie_auth_active = False
+
         if not skip_session and INSTAGRAM_SESSIONID:
             try:
                 cookie_dict = {"sessionid": INSTAGRAM_SESSIONID}
@@ -6953,6 +6955,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     WEB_DASHBOARD_DATA['session']['active'] = True
                     WEB_DASHBOARD_DATA['session']['username'] = SESSION_USERNAME
                 log_activity("Instagram cookie session auth successful", user=SESSION_USERNAME, level='system')
+                cookie_auth_active = True
             except Exception as e:
                 error_msg = format_error_message(e)
                 print(f"* Session cookie auth error for {user}: {error_msg}")
@@ -6962,7 +6965,7 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
                     sys.exit(1)
                 return
 
-        if not skip_session and SESSION_USERNAME:
+        if not skip_session and SESSION_USERNAME and not cookie_auth_active:
             try:
                 # Session file is shared - avoid concurrent load/login/save in multi-target mode
                 with SESSION_FILE_LOCK:
