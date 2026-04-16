@@ -768,6 +768,7 @@ TELEGRAM_BOT_THREAD = None
 TELEGRAM_BOT_STOP_EVENT = None
 TELEGRAM_BOT_LAST_UPDATE_ID = 0
 TELEGRAM_TARGETS = []
+TELEGRAM_PENDING_ACTIONS = {}  # chat_id -> "add" | "remove"
 
 import sys
 import signal
@@ -2331,19 +2332,80 @@ def _format_telegram_status_text() -> str:
     )
 
 
-def _handle_telegram_command(command_text: str) -> Optional[str]:
+def _extract_instagram_username(text: str) -> Optional[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+
+    # Accept full profile URL input, e.g. https://instagram.com/username/
+    m = re.search(r"(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9._]+)/?", raw, flags=re.IGNORECASE)
+    if m:
+        candidate = m.group(1)
+    else:
+        candidate = raw.split()[0]
+        if candidate.startswith("@"):
+            candidate = candidate[1:]
+        candidate = candidate.strip().strip("/")
+
+    if not candidate:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", candidate):
+        return None
+    if candidate.lower() in {"p", "reel", "reels", "stories", "explore", "accounts", "direct", "tv"}:
+        return None
+    return candidate.lower()
+
+
+def _telegram_add_target(username: str) -> str:
+    if username in TELEGRAM_TARGETS:
+        return f"_{username}_ is already in the target list."
+
+    TELEGRAM_TARGETS.append(username)
+    with WEB_DASHBOARD_DATA_LOCK:
+        if 'targets' not in WEB_DASHBOARD_DATA:
+            WEB_DASHBOARD_DATA['targets'] = {}
+        if username not in WEB_DASHBOARD_DATA['targets']:
+            WEB_DASHBOARD_DATA['targets'][username] = {
+                'followers': None, 'following': None, 'posts': None, 'reels': None,
+                'status': 'Pending',
+                'added': get_short_date_from_ts(datetime.now(), show_year=False, show_seconds=False),
+                'last_checked': None
+            }
+    DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
+    start_monitoring_for_target(username)
+    log_activity("Added target via Telegram", user=username, level='system')
+    return f"Added *{username}* and started monitoring."
+
+
+def _telegram_remove_target(username: str) -> str:
+    if username not in TELEGRAM_TARGETS:
+        return f"_{username}_ is not in the target list."
+
+    stop_monitoring_for_target(username)
+    TELEGRAM_TARGETS.remove(username)
+    with WEB_DASHBOARD_DATA_LOCK:
+        WEB_DASHBOARD_DATA.get('targets', {}).pop(username, None)
+    DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
+    log_activity("Removed target via Telegram", user=username, level='warning')
+    return f"Removed *{username}* and stopped monitoring."
+
+
+def _handle_telegram_command(command_text: str, chat_id: Any) -> Optional[str]:
+    chat_key = _normalize_telegram_chat_id(chat_id)
     cmd = command_text.strip().split()[0].lower()
     # Telegram may send commands with bot mention suffix, e.g. /start@my_bot
     cmd = cmd.split("@", 1)[0]
     if cmd == "/start":
-        return "Bot is online. Use /help to see available commands."
+        TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
+        return "Bot is online. Use /help.\nTip: tap /add or /remove, then send username or profile URL."
     if cmd == "/help":
         return (
             "*Commands*\n"
             "/status - Show monitor health summary\n"
             "/targets - List configured targets\n"
-            "/add <username> - Add an Instagram target\n"
-            "/remove <username> - Remove an Instagram target\n"
+            "/add [username|url] - Add target (or tap /add, then send username/URL)\n"
+            "/remove [username|url] - Remove target (or tap /remove, then send username/URL)\n"
+            "/cancel - Cancel pending add/remove prompt\n"
             "/recheck - Trigger recheck for active targets\n"
             "/stop - Stop all active monitors\n"
             "/resume - Resume monitors for configured targets"
@@ -2354,47 +2416,33 @@ def _handle_telegram_command(command_text: str) -> Optional[str]:
         if not TELEGRAM_TARGETS:
             return "No targets configured."
         return "*Configured targets:*\n" + "\n".join(f"• {u}" for u in TELEGRAM_TARGETS)
+    if cmd == "/cancel":
+        if TELEGRAM_PENDING_ACTIONS.pop(chat_key, None):
+            return "Cancelled pending command."
+        return "Nothing to cancel."
     if cmd == "/add":
         parts = command_text.strip().split()
         if len(parts) < 2:
-            return "Usage: /add <instagram_username>"
-        username = parts[1].strip().lower().lstrip('@')
+            TELEGRAM_PENDING_ACTIONS[chat_key] = "add"
+            return "Send Instagram username or profile URL to add.\nExample: `nasa` or `https://instagram.com/nasa/`"
+        username = _extract_instagram_username(" ".join(parts[1:]))
         if not username:
-            return "Usage: /add <instagram_username>"
-        if username in TELEGRAM_TARGETS:
-            return f"_{username}_ is already in the target list."
-        TELEGRAM_TARGETS.append(username)
-        with WEB_DASHBOARD_DATA_LOCK:
-            if 'targets' not in WEB_DASHBOARD_DATA:
-                WEB_DASHBOARD_DATA['targets'] = {}
-            if username not in WEB_DASHBOARD_DATA['targets']:
-                WEB_DASHBOARD_DATA['targets'][username] = {
-                    'followers': None, 'following': None, 'posts': None, 'reels': None,
-                    'status': 'Pending',
-                    'added': get_short_date_from_ts(datetime.now(), show_year=False, show_seconds=False),
-                    'last_checked': None
-                }
-        DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
-        start_monitoring_for_target(username)
-        log_activity(f"Added target via Telegram", user=username, level='system')
-        return f"Added *{username}* and started monitoring."
+            return "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
+        TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
+        return _telegram_add_target(username)
 
     if cmd == "/remove":
         parts = command_text.strip().split()
         if len(parts) < 2:
-            return "Usage: /remove <instagram_username>"
-        username = parts[1].strip().lower().lstrip('@')
+            TELEGRAM_PENDING_ACTIONS[chat_key] = "remove"
+            if TELEGRAM_TARGETS:
+                return "Send username or profile URL to remove.\nConfigured targets:\n" + "\n".join(f"• {u}" for u in TELEGRAM_TARGETS)
+            return "No targets configured to remove."
+        username = _extract_instagram_username(" ".join(parts[1:]))
         if not username:
-            return "Usage: /remove <instagram_username>"
-        if username not in TELEGRAM_TARGETS:
-            return f"_{username}_ is not in the target list."
-        stop_monitoring_for_target(username)
-        TELEGRAM_TARGETS.remove(username)
-        with WEB_DASHBOARD_DATA_LOCK:
-            WEB_DASHBOARD_DATA.get('targets', {}).pop(username, None)
-        DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
-        log_activity(f"Removed target via Telegram", user=username, level='warning')
-        return f"Removed *{username}* and stopped monitoring."
+            return "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
+        TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
+        return _telegram_remove_target(username)
 
     if cmd == "/recheck":
         ok = recheck_all_targets()
@@ -2491,12 +2539,30 @@ def start_telegram_bot_loop():
                     chat = message.get("chat", {}) or {}
                     chat_id = chat.get("id")
                     text = str(message.get("text", "")).strip()
-                    if not text.startswith("/"):
-                        continue
                     if not _telegram_admin_authorized(chat_id):
                         continue
 
-                    reply = _handle_telegram_command(text)
+                    reply = None
+                    chat_key = _normalize_telegram_chat_id(chat_id)
+                    if text.startswith("/"):
+                        reply = _handle_telegram_command(text, chat_id)
+                    else:
+                        pending_action = TELEGRAM_PENDING_ACTIONS.get(chat_key)
+                        if pending_action == "add":
+                            username = _extract_instagram_username(text)
+                            if username:
+                                TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
+                                reply = _telegram_add_target(username)
+                            else:
+                                reply = "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
+                        elif pending_action == "remove":
+                            username = _extract_instagram_username(text)
+                            if username:
+                                TELEGRAM_PENDING_ACTIONS.pop(chat_key, None)
+                                reply = _telegram_remove_target(username)
+                            else:
+                                reply = "Invalid username/URL. Send something like `nasa` or `https://instagram.com/nasa/`"
+
                     if reply:
                         send_telegram_message(
                             reply,
