@@ -769,6 +769,7 @@ TELEGRAM_BOT_STOP_EVENT = None
 TELEGRAM_BOT_LAST_UPDATE_ID = 0
 TELEGRAM_TARGETS = []
 TELEGRAM_PENDING_ACTIONS = {}  # chat_id -> "add" | "remove"
+INSTAGRAM_RATE_LIMIT_UNTIL = None  # local naive datetime until rechecks are blocked
 
 import sys
 import signal
@@ -2234,6 +2235,12 @@ def start_all_monitoring():
 def recheck_all_targets():
     global WEB_DASHBOARD_RECHECK_EVENTS, MULTI_TARGET_STAGGER, MULTI_TARGET_STAGGER_JITTER, INSTA_CHECK_INTERVAL
 
+    cooldown_msg = _instagram_recheck_block_message()
+    if cooldown_msg:
+        log_activity(f"Recheck blocked: {cooldown_msg}", level='warning')
+        update_ui_data(config={'status_msg': cooldown_msg})
+        return False
+
     with WEB_DASHBOARD_DATA_LOCK:  # type: ignore
         # Identify monitored targets by alive threads
         targets = [u for u, t in WEB_DASHBOARD_MONITOR_THREADS.items() if t.is_alive()]
@@ -2329,6 +2336,34 @@ def _format_telegram_status_text() -> str:
         f"• Last check: {last_check_text}\n"
         f"• Next check: {next_check_text}\n"
         f"• Session mode: {mode_of_the_tool}"
+    )
+
+
+def _mark_instagram_rate_limited(reason: str = "429", cooldown_minutes: int = 35) -> None:
+    global INSTAGRAM_RATE_LIMIT_UNTIL
+    until = now_local_naive() + timedelta(minutes=max(1, int(cooldown_minutes)))
+    if INSTAGRAM_RATE_LIMIT_UNTIL is None or until > INSTAGRAM_RATE_LIMIT_UNTIL:
+        INSTAGRAM_RATE_LIMIT_UNTIL = until
+        log_activity(
+            f"Instagram rate limit detected ({reason}); recheck blocked until {until.strftime('%H:%M:%S')}",
+            level='warning'
+        )
+
+
+def _instagram_recheck_block_message() -> Optional[str]:
+    global INSTAGRAM_RATE_LIMIT_UNTIL
+    if not INSTAGRAM_RATE_LIMIT_UNTIL:
+        return None
+    now = now_local_naive()
+    if now >= INSTAGRAM_RATE_LIMIT_UNTIL:
+        INSTAGRAM_RATE_LIMIT_UNTIL = None
+        return None
+    remaining_s = int((INSTAGRAM_RATE_LIMIT_UNTIL - now).total_seconds())
+    remaining_s = max(1, remaining_s)
+    return (
+        f"Instagram is rate-limited right now. "
+        f"Try again at {INSTAGRAM_RATE_LIMIT_UNTIL.strftime('%H:%M:%S')} "
+        f"(in {display_time(remaining_s)})."
     )
 
 
@@ -2445,6 +2480,9 @@ def _handle_telegram_command(command_text: str, chat_id: Any) -> Optional[str]:
         return _telegram_remove_target(username)
 
     if cmd == "/recheck":
+        cooldown_msg = _instagram_recheck_block_message()
+        if cooldown_msg:
+            return cooldown_msg
         ok = recheck_all_targets()
         return "Recheck requested." if ok else "Recheck could not run (no active targets)."
     if cmd == "/stop":
@@ -6306,6 +6344,10 @@ def instagram_wrap_request(orig_request):
 
                 # Back-off on any 429 (Too Many Requests) or 400 with "checkpoint"
                 if resp.status_code == 429 or (resp.status_code == 400 and "checkpoint" in resp.text):
+                    if resp.status_code == 429:
+                        _mark_instagram_rate_limited("429")
+                    else:
+                        _mark_instagram_rate_limited("checkpoint")
                     attempt += 1
                     if attempt > 3:
                         thread_pbar = getattr(_thread_local, 'pbar', None)
@@ -7058,6 +7100,11 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
     except Exception as e:
         _thread_local.in_partial_line = False
         error_msg = format_error_message(e)
+        err_lower = error_msg.lower()
+        if "429" in err_lower or "too many requests" in err_lower:
+            _mark_instagram_rate_limited("429")
+        elif "checkpoint" in err_lower or "challenge" in err_lower:
+            _mark_instagram_rate_limited("checkpoint/challenge")
         print(f"* Error: {error_msg}")
         print_cur_ts("\nTimestamp:\t\t\t\t")
         log_activity(f"Error: {error_msg}", user=user)
