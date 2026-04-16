@@ -4706,13 +4706,18 @@ def _profile_from_web_profile_info(bot: instaloader.Instaloader, username: str) 
     return instaloader.Profile(bot.context, normalized)
 
 
-# Resolves a profile by username by trying web_profile_info first in anonymous mode then Instaloader
+# Resolves a profile by username by trying web_profile_info first then Instaloader's GraphQL.
+# When anonymous, the mobile API is aggressively rate-limited so we wrap the attempt
+# and fall through quickly on failure instead of waiting for instaloader's 30-min retry.
 def profile_from_username_resilient(bot: instaloader.Instaloader, username: str) -> instaloader.Profile:
     ctx = bot.context
     if not ctx.is_logged_in:
-        fallback_profile = _profile_from_web_profile_info(bot, username)
-        if fallback_profile is not None:
-            return fallback_profile
+        try:
+            fallback_profile = _profile_from_web_profile_info(bot, username)
+            if fallback_profile is not None:
+                return fallback_profile
+        except Exception as e:
+            debug_print(f"web_profile_info failed for {username}, falling back to GraphQL: {e}")
 
     return instaloader.Profile.from_username(ctx, username)
 
@@ -6922,7 +6927,12 @@ def instagram_monitor_user(user, csv_file_name, skip_session, skip_followers, sk
         if ENABLE_JITTER or MULTI_TARGET_SERIALIZE_HTTP:
             ensure_requests_monkey_patched()
 
-        bot = instaloader.Instaloader(user_agent=USER_AGENT, iphone_support=True, quiet=True)
+        bot = instaloader.Instaloader(
+            user_agent=USER_AGENT,
+            iphone_support=True,
+            quiet=True,
+            max_connection_attempts=1 if skip_session else 3
+        )
 
         ctx = bot.context
 
