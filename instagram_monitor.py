@@ -2322,6 +2322,8 @@ def _handle_telegram_command(command_text: str) -> Optional[str]:
             "*Commands*\n"
             "/status - Show monitor health summary\n"
             "/targets - List configured targets\n"
+            "/add <username> - Add an Instagram target\n"
+            "/remove <username> - Remove an Instagram target\n"
             "/recheck - Trigger recheck for active targets\n"
             "/stop - Stop all active monitors\n"
             "/resume - Resume monitors for configured targets"
@@ -2332,6 +2334,48 @@ def _handle_telegram_command(command_text: str) -> Optional[str]:
         if not TELEGRAM_TARGETS:
             return "No targets configured."
         return "*Configured targets:*\n" + "\n".join(f"• {u}" for u in TELEGRAM_TARGETS)
+    if cmd == "/add":
+        parts = command_text.strip().split()
+        if len(parts) < 2:
+            return "Usage: /add <instagram_username>"
+        username = parts[1].strip().lower().lstrip('@')
+        if not username:
+            return "Usage: /add <instagram_username>"
+        if username in TELEGRAM_TARGETS:
+            return f"_{username}_ is already in the target list."
+        TELEGRAM_TARGETS.append(username)
+        with WEB_DASHBOARD_DATA_LOCK:
+            if 'targets' not in WEB_DASHBOARD_DATA:
+                WEB_DASHBOARD_DATA['targets'] = {}
+            if username not in WEB_DASHBOARD_DATA['targets']:
+                WEB_DASHBOARD_DATA['targets'][username] = {
+                    'followers': None, 'following': None, 'posts': None, 'reels': None,
+                    'status': 'Pending',
+                    'added': get_short_date_from_ts(datetime.now(), show_year=False, show_seconds=False),
+                    'last_checked': None
+                }
+        DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
+        start_monitoring_for_target(username)
+        log_activity(f"Added target via Telegram", user=username, level='system')
+        return f"Added *{username}* and started monitoring."
+
+    if cmd == "/remove":
+        parts = command_text.strip().split()
+        if len(parts) < 2:
+            return "Usage: /remove <instagram_username>"
+        username = parts[1].strip().lower().lstrip('@')
+        if not username:
+            return "Usage: /remove <instagram_username>"
+        if username not in TELEGRAM_TARGETS:
+            return f"_{username}_ is not in the target list."
+        stop_monitoring_for_target(username)
+        TELEGRAM_TARGETS.remove(username)
+        with WEB_DASHBOARD_DATA_LOCK:
+            WEB_DASHBOARD_DATA.get('targets', {}).pop(username, None)
+        DASHBOARD_DATA['targets_list'] = list(TELEGRAM_TARGETS)
+        log_activity(f"Removed target via Telegram", user=username, level='warning')
+        return f"Removed *{username}* and stopped monitoring."
+
     if cmd == "/recheck":
         ok = recheck_all_targets()
         return "Recheck requested." if ok else "Recheck could not run (no active targets)."
@@ -9901,7 +9945,7 @@ def run_main():
         WEB_DASHBOARD_TEMPLATE_DIR = os.path.abspath(os.path.expanduser(args.web_dashboard_template_dir))
 
     # Allow empty targets with specific flags
-    if not targets and not WEB_DASHBOARD_ENABLED:
+    if not targets and not WEB_DASHBOARD_ENABLED and not TELEGRAM_ENABLED:
         utility_flags = {
             "--no-color", "-h", "--help",
             "--web-dashboard", "--version"
