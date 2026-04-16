@@ -792,7 +792,10 @@ from os.path import expanduser, dirname, basename
 
 # Render compatibility: honor platform-provided host/port when available.
 WEB_DASHBOARD_PORT = int(os.getenv('PORT', str(WEB_DASHBOARD_PORT)))
-WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', WEB_DASHBOARD_HOST)
+if os.getenv('PORT'):
+    WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', '0.0.0.0')
+else:
+    WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', WEB_DASHBOARD_HOST)
 from datetime import datetime, timezone, timedelta
 from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
