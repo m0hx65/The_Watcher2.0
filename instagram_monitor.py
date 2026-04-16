@@ -687,8 +687,8 @@ DEBUG_MODE = False
 VERBOSE_MODE = False
 DASHBOARD_ENABLED = False
 WEB_DASHBOARD_ENABLED = False
-WEB_DASHBOARD_PORT = int(os.getenv('PORT', '8000'))
-WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', '127.0.0.1')
+WEB_DASHBOARD_PORT = 8000
+WEB_DASHBOARD_HOST = '127.0.0.1'
 WEB_DASHBOARD_TEMPLATE_DIR = ""
 DASHBOARD_SHOW_CHECK_SECONDS = True
 THUMBNAILS_FORCED_BY_WEB = False
@@ -789,6 +789,10 @@ import string
 import json
 import os
 from os.path import expanduser, dirname, basename
+
+# Render compatibility: honor platform-provided host/port when available.
+WEB_DASHBOARD_PORT = int(os.getenv('PORT', str(WEB_DASHBOARD_PORT)))
+WEB_DASHBOARD_HOST = os.getenv('WEB_DASHBOARD_HOST', WEB_DASHBOARD_HOST)
 from datetime import datetime, timezone, timedelta
 from dateutil import relativedelta
 from dateutil.parser import isoparse, parse
