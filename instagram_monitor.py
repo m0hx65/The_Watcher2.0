@@ -9771,17 +9771,18 @@ def run_main():
             if env_path:
                 print(f"* Warning: Cannot load dotenv file '{env_path}' because 'python-dotenv' is not installed\n\nTo install it, run:\n    pip3 install python-dotenv\n\nOnce installed, re-run this tool\n")
 
-    if env_path:
-        for secret in SECRET_KEYS:
-            val = os.getenv(secret)
-            if val is not None:
-                globals()[secret] = val
-        telegram_chat_env = os.getenv("TELEGRAM_CHAT_ID")
-        if telegram_chat_env is not None:
-            TELEGRAM_CHAT_ID = _normalize_telegram_chat_id(telegram_chat_env)
-        telegram_enabled_env = os.getenv("TELEGRAM_ENABLED")
-        if telegram_enabled_env is not None:
-            TELEGRAM_ENABLED = telegram_enabled_env.strip().lower() in ("1", "true", "yes", "on")
+    # Always honor process environment variables (e.g. Render dashboard env vars),
+    # regardless of whether a dotenv file was found.
+    for secret in SECRET_KEYS:
+        val = os.getenv(secret)
+        if val is not None:
+            globals()[secret] = val
+    telegram_chat_env = os.getenv("TELEGRAM_CHAT_ID")
+    if telegram_chat_env is not None:
+        TELEGRAM_CHAT_ID = _normalize_telegram_chat_id(telegram_chat_env)
+    telegram_enabled_env = os.getenv("TELEGRAM_ENABLED")
+    if telegram_enabled_env is not None:
+        TELEGRAM_ENABLED = telegram_enabled_env.strip().lower() in ("1", "true", "yes", "on")
 
     if args.import_firefox_session:
 
